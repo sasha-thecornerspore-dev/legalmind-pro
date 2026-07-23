@@ -161,14 +161,28 @@ def classify_doc_type(filename: str) -> str:
 
 
 # ── LLM Providers ────────────────────────────────────────────────────────────
-# Supported: "ollama" (local), "claude" (Anthropic API), "openai" (OpenAI-compatible)
+# Supported providers:
+#   "ollama"     — local models (no cost, no cloud)
+#   "claude-cli" — Claude via your Claude Code SUBSCRIPTION (no API key, no
+#                  per-token billing); requires the `claude` CLI, logged in
+#   "claude"     — Anthropic API (pay-per-token, needs an API key)
+#   "openai"     — any OpenAI-compatible endpoint (needs an API key)
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "gemma"
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_CLAUDE_CLI_MODEL = ""   # empty => whatever Claude Code is configured to use
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_URL = "https://api.openai.com/v1"
 
-LLM_PROVIDERS = ["ollama", "claude", "openai"]
+LLM_PROVIDERS = ["ollama", "claude-cli", "claude", "openai"]
+
+# Human-readable names for the provider dropdown.
+PROVIDER_LABELS = {
+    "ollama":     "Ollama (local)",
+    "claude-cli": "Claude (subscription)",
+    "claude":     "Claude (API key)",
+    "openai":     "OpenAI-compatible (API key)",
+}
 
 
 def query_ollama(prompt: str, model: str = DEFAULT_OLLAMA_MODEL,
@@ -275,14 +289,65 @@ def query_openai(prompt: str, model: str = DEFAULT_OPENAI_MODEL,
         return f"Error connecting to OpenAI-compatible API: {e}"
 
 
+def _claude_cli_path() -> str:
+    """Locate the Claude Code CLI executable, or '' if not installed."""
+    import shutil
+    exe = shutil.which("claude")
+    if exe:
+        return exe
+    # Fall back to the default per-user install location.
+    name = "claude.exe" if sys.platform == "win32" else "claude"
+    cand = os.path.join(os.path.expanduser("~"), ".local", "bin", name)
+    return cand if os.path.isfile(cand) else ""
+
+
+def check_claude_cli() -> bool:
+    """True if Claude can be used via the local subscription-backed CLI."""
+    return bool(_claude_cli_path())
+
+
+def query_claude_cli(prompt: str, model: str = DEFAULT_CLAUDE_CLI_MODEL,
+                     timeout: int = 300) -> str:
+    """Query Claude through the Claude Code CLI in print mode.
+
+    Uses whatever the local `claude` CLI is logged in with — typically a
+    Claude Pro/Max SUBSCRIPTION — so there is no API key and no per-token
+    billing. The prompt is piped via stdin, which avoids Windows
+    command-length limits on large RAG contexts.
+    """
+    import subprocess
+    exe = _claude_cli_path()
+    if not exe:
+        return ("Error: Claude Code CLI not found. Install it from "
+                "https://claude.com/claude-code, then run `claude` once to log "
+                "in with your subscription.")
+    args = [exe, "-p"]
+    if model:
+        args += ["--model", model]
+    try:
+        r = subprocess.run(args, input=prompt, capture_output=True, text=True,
+                           timeout=timeout, encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        return "Error: Claude CLI timed out."
+    except Exception as e:
+        return f"Error launching Claude CLI: {e}"
+    if r.returncode != 0:
+        err = (r.stderr or "").strip()
+        return (f"Error from Claude CLI (exit {r.returncode}): "
+                f"{err or 'no output — are you logged in? run `claude` once.'}")
+    return (r.stdout or "").strip()
+
+
 def query_llm(prompt: str, provider: str = "ollama", model: str = "",
               **kwargs) -> str:
     """Unified LLM query dispatcher — routes to the configured provider.
 
-    provider: "ollama" | "claude" | "openai"
+    provider: "ollama" | "claude-cli" | "claude" | "openai"
     model: model name override (uses provider defaults if empty)
     """
     provider = provider.lower().strip()
+    if provider in ("claude-cli", "claude-subscription"):
+        return query_claude_cli(prompt, model=model or DEFAULT_CLAUDE_CLI_MODEL)
     if provider == "claude":
         return query_claude(prompt, model=model or DEFAULT_CLAUDE_MODEL, **kwargs)
     elif provider == "openai":
@@ -446,18 +511,77 @@ def query_openai_stream(messages: list, on_token, model: str = DEFAULT_OPENAI_MO
     return "".join(full)
 
 
+def query_claude_cli_stream(messages: list, on_token, model: str = DEFAULT_CLAUDE_CLI_MODEL,
+                            system: str = "", timeout: int = 600) -> str:
+    """Streaming variant of the subscription-backed Claude CLI provider.
+
+    Claude Code print mode is single-shot, so the conversation is flattened
+    into one prompt (as with Ollama). stdout is read incrementally and pushed
+    through on_token as it arrives.
+    """
+    import subprocess
+    exe = _claude_cli_path()
+    if not exe:
+        msg = ("Error: Claude Code CLI not found. Install it from "
+               "https://claude.com/claude-code and run `claude` once to log in.")
+        on_token(msg)
+        return msg
+
+    if len(messages) == 1 and not system:
+        prompt = messages[0].get("content", "")
+    else:
+        parts = []
+        if system:
+            parts.append(system)
+        for m in messages:
+            tag = "User" if m.get("role") == "user" else "Assistant"
+            parts.append(f"{tag}: {m.get('content', '')}")
+        prompt = "\n\n".join(parts)
+
+    args = [exe, "-p"]
+    if model:
+        args += ["--model", model]
+
+    acc = []
+    try:
+        proc = subprocess.Popen(
+            args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8",
+            errors="replace", bufsize=1)
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+        for chunk in proc.stdout:
+            acc.append(chunk)
+            on_token(chunk)
+        proc.wait(timeout=timeout)
+        if proc.returncode != 0:
+            err = (proc.stderr.read() or "").strip()
+            tail = f"\n[Claude CLI error: {err or proc.returncode}]"
+            on_token(tail)
+            acc.append(tail)
+    except Exception as e:
+        tail = f"\n[Claude CLI error: {e}]"
+        on_token(tail)
+        acc.append(tail)
+    return "".join(acc).strip()
+
+
 def query_llm_stream(provider: str, on_token, model: str = "",
                      prompt: str = "", messages: list | None = None,
                      system: str = "", **kwargs) -> str:
     """Unified streaming dispatcher.
 
     Provide either ``prompt`` (single-turn) or ``messages`` (multi-turn).
-    For Ollama, multi-turn ``messages`` get flattened into a single prompt.
+    For Ollama and the Claude CLI, multi-turn ``messages`` get flattened.
     """
     provider = (provider or "ollama").lower().strip()
     if messages is None:
         messages = [{"role": "user", "content": prompt or ""}]
 
+    if provider in ("claude-cli", "claude-subscription"):
+        return query_claude_cli_stream(
+            messages, on_token, model=model or DEFAULT_CLAUDE_CLI_MODEL,
+            system=system or "")
     if provider == "claude":
         return query_claude_stream(
             messages, on_token,

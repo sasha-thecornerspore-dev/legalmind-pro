@@ -463,8 +463,8 @@ class LegalMindApp:
         saved = _load_settings()
         self.llm_provider_var = tk.StringVar(value=saved.get("llm_provider", "ollama"))
         provider_combo = ttk.Combobox(top_inner, textvariable=self.llm_provider_var,
-                                      values=["ollama", "claude", "openai"],
-                                      width=8, state="readonly")
+                                      values=LLM_PROVIDERS,
+                                      width=11, state="readonly")
         provider_combo.pack(side="left", padx=(6, 16), pady=8)
         provider_combo.bind("<<ComboboxSelected>>",
                             lambda e: self._persist_pref("llm_provider",
@@ -1134,7 +1134,7 @@ class LegalMindApp:
             api_kwargs["url"] = settings.get("openai_url", DEFAULT_OPENAI_URL)
 
         messages = []
-        if multi_turn and provider in ("claude", "openai") and prior_history:
+        if multi_turn and provider in ("claude", "openai", "claude-cli") and prior_history:
             # Trim history to the configured depth, keeping it well-formed
             trimmed = prior_history[-depth:]
             # Drop a leading assistant turn if it ends up alone
@@ -1165,6 +1165,14 @@ class LegalMindApp:
                     response = query_openai_messages(
                         messages, model=model or DEFAULT_OPENAI_MODEL,
                         url=api_kwargs.get("url", DEFAULT_OPENAI_URL))
+                elif multi_turn and provider == "claude-cli" and len(messages) > 1:
+                    # CLI print mode is single-shot: flatten history into stdin.
+                    parts = ([system_prompt] if system_prompt else [])
+                    for m in messages:
+                        who = "User" if m.get("role") == "user" else "Assistant"
+                        parts.append(f"{who}: {m.get('content', '')}")
+                    response = query_llm("\n\n".join(parts), provider=provider,
+                                         model=model)
                 else:
                     response = query_llm(flat_prompt, provider=provider, model=model)
         except Exception as e:

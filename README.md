@@ -2,7 +2,7 @@
 
 **Local-first legal document intelligence. No data leaves your machine.**
 
-LegalMind Pro is a Retrieval-Augmented Generation (RAG) system built for legal professionals. It ingests your case documents (PDFs), indexes them into a local vector database, and lets you search across thousands of pages using natural language queries. Optionally integrates with [Ollama](https://ollama.com) for AI-powered analysis.
+LegalMind Pro is a Retrieval-Augmented Generation (RAG) system built for legal professionals. It ingests your case documents (PDFs), indexes them into a local vector database, and lets you search across thousands of pages using natural language queries. AI analysis is optional and provider-agnostic: a local Ollama model (fully offline), your Claude subscription, the Claude API, or any OpenAI-compatible endpoint.
 
 ---
 
@@ -16,13 +16,13 @@ LegalMind Pro is a Retrieval-Augmented Generation (RAG) system built for legal p
 - **Extracted-text fast path** — Ingest pre-extracted, de-duplicated text directly, skipping PDF rendering and OCR entirely
 - **Semantic search** — Find relevant passages using meaning, not just keywords
 - **Document type classification** — Auto-classifies filings (Motion, Order, Affidavit, Exhibit, etc.)
-- **Ollama AI analysis** — Optional local LLM integration for evidence-based answers with citations
+- **Choice of AI provider** — Analyze results with a local **Ollama** model, your **Claude subscription** (via the Claude Code CLI — no API key, no per-token cost), the **Claude API**, or any **OpenAI-compatible** endpoint
 - **Dark-themed GUI** — Professional desktop interface with real-time ingest progress
 - **CLI tools** — Command-line ingestor and query tool for power users
 - **MCP server** — Expose your legal database to Claude Desktop as a tool
 - **Export results** — Copy or save query results to text files
 - **In-app auto-update** — Checks GitHub for new releases on startup and offers a one-click download
-- **100% local** — Everything runs on your machine. No cloud, no API keys, no data leaving your network.
+- **Local by default** — Documents are stored and searched entirely on your machine. AI analysis is *your* choice: **Ollama keeps everything on-device**, while the Claude/OpenAI options send only the retrieved snippets and your question to that provider.
 
 ---
 
@@ -145,9 +145,11 @@ PDF Files
 │                     │  gated at 0.35 to keep noise out of AI answers
 └─────────┬───────────┘
           ▼
-┌─────────────────────┐
-│  Ollama (optional)   │  AI analysis with source citations
-└─────────────────────┘
+┌──────────────────────────┐
+│  LLM provider (optional) │  AI analysis with source citations —
+│  Ollama · Claude sub ·   │  Ollama runs on-device; Claude/OpenAI
+│  Claude API · OpenAI     │  receive only the retrieved snippets
+└──────────────────────────┘
 ```
 
 ---
@@ -206,6 +208,7 @@ LegalMind can expose your legal database as tools for Claude Desktop:
 
 Settings are saved to `settings.json` and can be changed in the GUI Settings tab:
 
+- **AI provider**: `ollama` (local), `claude-cli` (your Claude Pro/Max **subscription** via the [Claude Code](https://claude.com/claude-code) CLI — run `claude` once to log in), `claude` (Anthropic API key), or `openai` (any OpenAI-compatible endpoint)
 - **Ollama model**: Which local LLM to use for analysis (default: `gemma`)
 - **Tesseract path**: Path to `tesseract.exe` for OCR
 - **Poppler path**: Path to Poppler's `bin` directory for OCR
