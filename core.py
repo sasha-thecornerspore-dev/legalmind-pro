@@ -53,7 +53,7 @@ logger = logging.getLogger("legalmind.core")
 # ── Version ──────────────────────────────────────────────────────────────────
 # Single source of truth. The in-app updater compares this against the latest
 # GitHub Release tag (see updater.py). Bump on every tagged release.
-VERSION = "11.0.0"
+VERSION = "11.1.0"
 
 # Repo the in-app updater checks for new releases. Forks can repoint it with
 # the LEGALMIND_REPO environment variable without editing source.
@@ -77,17 +77,57 @@ EMBED_MODEL = EMBED_MODEL_DIR if os.path.isdir(EMBED_MODEL_DIR) else EMBED_MODEL
 # at write time rather than silent corruption.
 EMBED_DIM = 384
 
-# ── OCR tool paths (Windows defaults — override via settings or env vars) ────
-# Tesseract:  https://github.com/UB-Mannheim/tesseract/wiki
-# Poppler:    https://github.com/oschwartz10612/poppler-windows/releases
-TESSERACT_CMD = os.environ.get(
-    "TESSERACT_CMD",
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-)
-POPPLER_PATH = os.environ.get(
-    "POPPLER_PATH",
-    r"C:\Program Files\poppler\Library\bin",  # common install location
-)
+# ── OCR tool paths (platform-aware defaults — override via settings/env) ─────
+# Tesseract:  Windows https://github.com/UB-Mannheim/tesseract/wiki
+#             macOS   `brew install tesseract`   Linux `apt install tesseract-ocr`
+# Poppler:    Windows https://github.com/oschwartz10612/poppler-windows/releases
+#             macOS   `brew install poppler`     Linux `apt install poppler-utils`
+def _first_existing(candidates, fallback):
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return fallback
+
+
+def _default_tesseract() -> str:
+    if sys.platform == "win32":
+        return r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    # macOS (Homebrew on Apple Silicon / Intel) and Linux; else assume on PATH.
+    return _first_existing(
+        ["/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract",
+         "/usr/bin/tesseract"],
+        "tesseract")
+
+
+def _default_poppler() -> str:
+    """Directory containing pdftoppm. Empty string means 'use PATH'."""
+    if sys.platform == "win32":
+        return r"C:\Program Files\poppler\Library\bin"
+    for d in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"):
+        if os.path.isfile(os.path.join(d, "pdftoppm")):
+            return d
+    return ""  # pdf2image will look on PATH
+
+
+TESSERACT_CMD = os.environ.get("TESSERACT_CMD", _default_tesseract())
+POPPLER_PATH = os.environ.get("POPPLER_PATH", _default_poppler())
+
+
+def open_path(path: str) -> None:
+    """Open a file or folder with the OS default handler. Cross-platform.
+
+    os.startfile is Windows-only; macOS uses `open`, Linux uses `xdg-open`.
+    """
+    import subprocess
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)  # type: ignore[attr-defined]  # noqa: F401
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+    except Exception as e:
+        logger.warning("could not open %s: %s", path, e)
 
 # Settings file for persisted user overrides (JSON)
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")

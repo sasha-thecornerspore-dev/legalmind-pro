@@ -61,7 +61,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import store
 from store import list_cases, query_collection, VECTORS_DIR
 from core import (
-    classify_doc_type, VERSION,
+    classify_doc_type, VERSION, open_path,
     query_ollama, list_ollama_models, DEFAULT_OLLAMA_MODEL,
     get_tesseract_cmd, get_poppler_path, save_settings, _load_settings,
     query_llm, query_claude, query_openai, LLM_PROVIDERS,
@@ -415,13 +415,7 @@ class LegalMindApp:
         if not os.path.exists(log_path):
             messagebox.showinfo("No Log", f"Log file not found yet:\n{log_path}")
             return
-        try:
-            os.startfile(log_path)
-        except AttributeError:
-            import subprocess
-            subprocess.Popen(["xdg-open", log_path])
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not open log file:\n{e}")
+        open_path(log_path)
 
     # =========================================================================
     # CHAT TAB (replaces old Query tab)
@@ -707,16 +701,10 @@ class LegalMindApp:
                 "Source not found",
                 f"The source file no longer exists:\n{source_path}")
             return
-        try:
-            os.startfile(source_path)
-            self._update_status(
-                f"Opened: {os.path.basename(source_path)}"
-                + (f" (p.{page})" if page not in (None, "?", "") else ""))
-        except AttributeError:
-            import subprocess
-            subprocess.Popen(["xdg-open", source_path])
-        except Exception as e:
-            messagebox.showerror("Open failed", f"Could not open file:\n{e}")
+        open_path(source_path)
+        self._update_status(
+            f"Opened: {os.path.basename(source_path)}"
+            + (f" (p.{page})" if page not in (None, "?", "") else ""))
 
     def _add_chat_bubble(self, role: str, text: str, extra_info: str = "",
                          citations: list | None = None):
@@ -1489,10 +1477,7 @@ class LegalMindApp:
     def _open_sessions_folder(self):
         try:
             os.makedirs(SESSIONS_DIR, exist_ok=True)
-            os.startfile(SESSIONS_DIR)
-        except AttributeError:
-            import subprocess
-            subprocess.Popen(["xdg-open", SESSIONS_DIR])
+            open_path(SESSIONS_DIR)
         except Exception as e:
             messagebox.showerror("Open failed", str(e))
 

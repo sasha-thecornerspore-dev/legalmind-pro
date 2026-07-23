@@ -39,10 +39,15 @@ unzip it, and run `install.bat`.
 ```bash
 git clone https://github.com/sasha-thecornerspore-dev/legalmind-pro.git
 cd legalmind-pro
-install.bat        # installs dependencies + creates a desktop shortcut
 ```
 
+- **Windows:** run `install.bat` (installs dependencies + desktop shortcut), then launch with `legalmind.bat`.
+- **macOS / Linux:** run `./install.sh`, then launch with `./legalmind.command` (double-click in Finder on macOS) or `python3 gui.py`.
+
 Or install dependencies manually with `pip install -r requirements.txt`.
+
+> **macOS note:** the GUI needs Tk. The python.org installer includes it; with
+> Homebrew Python run `brew install python-tk`. For OCR: `brew install tesseract poppler`.
 
 The embedding model (`all-MiniLM-L6-v2`) downloads automatically on first run, or
 rebuild it from a local HuggingFace cache with `python tools/rebuild_model.py`.
@@ -75,7 +80,7 @@ python gui.py
 ## System Requirements
 
 - **Python 3.10+** (tested on 3.10–3.14)
-- **Windows 10/11** (primary target), Linux/macOS should work with minor adjustments
+- **Windows 10/11, macOS, or Linux** — cross-platform (Python + tkinter)
 - **4 GB RAM minimum**, 8+ GB recommended for large collections
 - **Disk space**: ~1.5 GB per 100K document chunks indexed
 
@@ -83,8 +88,8 @@ python gui.py
 
 | Component | Purpose | Download |
 |-----------|---------|----------|
-| **Tesseract** | OCR for scanned PDFs | [GitHub](https://github.com/UB-Mannheim/tesseract/wiki) |
-| **Poppler** | PDF-to-image conversion for OCR | [GitHub](https://github.com/oschwartz10612/poppler-windows/releases) |
+| **Tesseract** | OCR for scanned PDFs | Win: [installer](https://github.com/UB-Mannheim/tesseract/wiki) · macOS: `brew install tesseract` · Linux: `apt install tesseract-ocr` |
+| **Poppler** | PDF-to-image conversion for OCR | Win: [releases](https://github.com/oschwartz10612/poppler-windows/releases) · macOS: `brew install poppler` · Linux: `apt install poppler-utils` |
 | **Ollama** | Local AI analysis of search results | [ollama.com](https://ollama.com) |
 
 ---
@@ -105,8 +110,10 @@ legal-rag/
   legal_rag_mcp.py     # MCP server for Claude Desktop integration
   legalmind.bat        # GUI launcher (Windows)
   legalmind_debug.bat  # Debug launcher (shows console output)
-  create_shortcut.bat  # Creates a desktop shortcut
-  install.bat          # One-click installer
+  create_shortcut.bat  # Creates a desktop shortcut (Windows)
+  install.bat          # One-click installer (Windows)
+  legalmind.command    # GUI launcher (macOS / Linux, double-clickable)
+  install.sh           # Installer (macOS / Linux)
   legalmind.ico        # Application icon
   requirements.txt     # Python dependencies
   vectors/             # LanceDB vector store (created on first ingest, gitignored)
