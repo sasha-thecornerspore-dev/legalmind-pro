@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "legal-rag": {
+      "command": "python",
+      "args": ["/ABSOLUTE/PATH/TO/legalmind-pro/legal_rag_mcp.py"]
+    }
+  }
+}

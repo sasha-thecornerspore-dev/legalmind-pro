@@ -1,0 +1,56 @@
+name: Release
+
+# Cuts an installable release whenever a version tag (vX.Y.Z) is pushed.
+# The asset is a source zip built with `git archive`, so it contains ONLY
+# tracked files — never models/, vectors/, settings, logs, or case data.
+# End users unzip it and run install.bat (sets up dependencies + shortcut).
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write   # needed to create the Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches core.VERSION
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CODE=$(grep -oP 'VERSION\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' core.py | head -1)
+          echo "tag=$TAG  core.VERSION=$CODE"
+          if [ "$TAG" != "$CODE" ]; then
+            echo "::error::Tag v$TAG does not match core.VERSION ($CODE). Bump VERSION in core.py."
+            exit 1
+          fi
+
+      - name: Build installable source zip (tracked files only)
+        run: |
+          NAME="LegalMind-Pro-${GITHUB_REF_NAME}"
+          git archive --format=zip --prefix="${NAME}/" -o "${NAME}.zip" HEAD
+          echo "ASSET=${NAME}.zip" >> "$GITHUB_ENV"
+          unzip -l "${NAME}.zip" | tail -5
+
+      - name: Publish the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "LegalMind Pro ${{ github.ref_name }}"
+          generate_release_notes: true
+          files: ${{ env.ASSET }}
+          body: |
+            **LegalMind Pro ${{ github.ref_name }}** — local-first legal document intelligence.
+
+            ### Install
+            1. Download `${{ env.ASSET }}` below and unzip it.
+            2. Run `install.bat` (installs Python dependencies and creates a desktop shortcut).
+            3. Launch from the shortcut, or run `legalmind.bat`.
+
+            The app checks for newer releases on startup and offers the update in-app.
+
+            _This zip contains source only — no models, vectors, or user data._

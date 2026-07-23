@@ -1,0 +1,72 @@
+# LegalMind Pro — .gitignore
+
+# Vector database (user data — never commit)
+chroma_db/
+chroma.sqlite3
+vectors/
+
+# Local embedding model (~87 MB, rebuilt by tools/rebuild_model.py)
+models/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Logs
+*.log
+legalmind.log
+crash.log
+
+# User settings
+settings.json
+
+# Error dumps
+legalmind_error.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Ad-hoc scratch test scripts at the repo root (not the real suite)
+/test_*.py
+!tests/
+
+# Case document folders (user data)
+Foreclosure/
+SARAH/
+case_files/
+
+# Saved chat sessions (contain case content — never publish)
+chat_sessions/
+
+# Internal planning / design docs (case-specific)
+docs/superpowers/
+
+# User-specific run scripts (hard-coded corpus paths, case probes)
+tools/pilot.py
+tools/ingest_queue.py
+pilot_run.log
+ingest_queue.log
+extracted_ingest.log
+docket_ingest.log
+extracted_deferred.json
+
+# Deprecated / dev-only files
+query_json.py
