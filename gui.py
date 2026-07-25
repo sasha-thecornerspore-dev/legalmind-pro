@@ -417,6 +417,39 @@ class LegalMindApp:
             return
         open_path(log_path)
 
+    def _change_db_location(self):
+        """Point the app at a different database folder (e.g. an existing one
+        after a fresh install). Persists the choice and reloads the cases."""
+        import store
+        current = store.VECTORS_DIR
+        chosen = filedialog.askdirectory(
+            title="Select the LegalMind database folder",
+            initialdir=current if os.path.isdir(current) else os.path.expanduser("~"))
+        if not chosen:
+            return
+        try:
+            store.set_vectors_dir(chosen)
+            cases = store.list_cases()
+        except Exception as e:
+            messagebox.showerror(
+                "Database", f"Could not open that folder as a database:\n{e}")
+            return
+        self.db_path_label.configure(text=store.VECTORS_DIR)
+        self._refresh_case_lists()
+        n = len(cases)
+        total = sum(c.get("chunks", 0) for c in cases)
+        if n:
+            messagebox.showinfo(
+                "Database changed",
+                f"Now using:\n{store.VECTORS_DIR}\n\n"
+                f"Found {n} case(s), {total:,} chunks.")
+        else:
+            hint = ("" if store.looks_like_store(chosen) else
+                    "\n\n(No existing index here yet — it will be created on "
+                    "first ingest.)")
+            messagebox.showinfo(
+                "Database changed", f"Now using:\n{store.VECTORS_DIR}{hint}")
+
     # =========================================================================
     # CHAT TAB (replaces old Query tab)
     # =========================================================================
@@ -1541,8 +1574,10 @@ class LegalMindApp:
 
         # ── Background throttle: the switch + slider ─────────────────────
         _saved = _load_settings()
-        thr_inner = tk.Frame(opts_card, bg=BG_CARD, padx=16, pady=(0, 8))
-        thr_inner.pack(fill="x")
+        # A widget's own padx/pady must be a single distance; the asymmetric
+        # (top, bottom) spacing belongs on the geometry call (.pack), not here.
+        thr_inner = tk.Frame(opts_card, bg=BG_CARD, padx=16, pady=4)
+        thr_inner.pack(fill="x", pady=(0, 8))
 
         self.bg_ingest_var = tk.BooleanVar(
             value=bool(_saved.get("ingest_background", False)))
@@ -2240,8 +2275,14 @@ class LegalMindApp:
 
         tk.Label(inner, text="Database:", font=FONT, bg=BG, fg=FG).grid(
             row=row, column=0, sticky="w", pady=4)
-        tk.Label(inner, text=VECTORS_DIR, font=FONT_SMALL, bg=BG, fg=FG_DIM).grid(
-            row=row, column=1, columnspan=2, sticky="w", padx=(10, 0), pady=4); row += 1
+        import store as _store
+        self.db_path_label = tk.Label(inner, text=_store.VECTORS_DIR,
+                                      font=FONT_SMALL, bg=BG, fg=FG_DIM,
+                                      wraplength=420, justify="left", anchor="w")
+        self.db_path_label.grid(row=row, column=1, sticky="w", padx=(10, 0), pady=4)
+        ttk.Button(inner, text="Change...",
+                   command=self._change_db_location).grid(
+            row=row, column=2, padx=(10, 0), pady=4); row += 1
 
         tk.Label(inner, text="Embeddings:", font=FONT, bg=BG, fg=FG).grid(
             row=row, column=0, sticky="w", pady=4)

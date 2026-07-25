@@ -22,6 +22,7 @@ LegalMind Pro is a Retrieval-Augmented Generation (RAG) system built for legal p
 - **MCP server** — Expose your legal database to Claude Desktop as a tool
 - **Export results** — Copy or save query results to text files
 - **In-app auto-update** — Checks GitHub for new releases on startup and offers a one-click download
+- **Portable database** — Point the app at any database folder (Settings → Database → Change), the `LEGALMIND_VECTORS` env var, or a saved setting. A fresh install on a new machine connects to your existing index instead of starting empty.
 - **Local by default** — Documents are stored and searched entirely on your machine. AI analysis is *your* choice: **Ollama keeps everything on-device**, while the Claude/OpenAI options send only the retrieved snippets and your question to that provider.
 
 ---
@@ -46,8 +47,10 @@ cd legalmind-pro
 
 Or install dependencies manually with `pip install -r requirements.txt`.
 
-> **macOS note:** the GUI needs Tk. The python.org installer includes it; with
-> Homebrew Python run `brew install python-tk`. For OCR: `brew install tesseract poppler`.
+> **macOS / Linux note:** `install.sh` detects whatever is missing (Tk for the GUI,
+> Tesseract + Poppler for OCR) and offers to install it via your package manager
+> (Homebrew / apt / dnf / pacman) — it will even offer to install Homebrew on macOS.
+> Run `./install.sh -y` to accept everything non-interactively.
 
 The embedding model (`all-MiniLM-L6-v2`) downloads automatically on first run, or
 rebuild it from a local HuggingFace cache with `python tools/rebuild_model.py`.

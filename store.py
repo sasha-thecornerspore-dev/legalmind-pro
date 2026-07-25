@@ -16,16 +16,64 @@ import uuid
 
 import pyarrow as pa
 
-from core import BASE_DIR, EMBED_DIM, get_embeddings
+from core import BASE_DIR, EMBED_DIM, get_embeddings, _load_settings, save_settings
 
 logger = logging.getLogger("legalmind.store")
 
-VECTORS_DIR = os.path.join(BASE_DIR, "vectors")
+# Where the LanceDB store lives. Resolution order, most specific first:
+#   1. the LEGALMIND_VECTORS environment variable
+#   2. a saved "vectors_dir" setting (set in the GUI's Settings tab)
+#   3. the default <install-dir>/vectors
+# This is what lets a fresh install point at an existing database instead of
+# creating a new empty one next to the code.
+DEFAULT_VECTORS_DIR = os.path.join(BASE_DIR, "vectors")
+
+
+def _resolve_vectors_dir() -> str:
+    env = os.environ.get("LEGALMIND_VECTORS")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    saved = (_load_settings() or {}).get("vectors_dir")
+    if saved:
+        return os.path.abspath(os.path.expanduser(saved))
+    return DEFAULT_VECTORS_DIR
+
+
+VECTORS_DIR = _resolve_vectors_dir()
 
 CHUNKS_TABLE = "chunks"
 FILES_TABLE = "ingested_files"
 
 _db = None
+
+
+def set_vectors_dir(path: str, *, persist: bool = True) -> None:
+    """Point the store at a different database directory.
+
+    Drops the cached connection so the next call opens the new location.
+    With persist=True the choice is saved so it survives a restart -- this is
+    how a fresh install is told where an existing database lives.
+    """
+    global VECTORS_DIR, _db
+    VECTORS_DIR = os.path.abspath(os.path.expanduser(path))
+    _db = None
+    if persist:
+        save_settings({"vectors_dir": VECTORS_DIR})
+    logger.info("Vector store location set to %s", VECTORS_DIR)
+
+
+def looks_like_store(path: str) -> bool:
+    """True if `path` holds an existing LanceDB store with real tables.
+
+    Keys on '*.lance' table directories only. NOT on '__manifest', which
+    LanceDB creates the instant you connect to a folder — so checking for it
+    would flag an empty, freshly-connected directory as if it held data.
+    """
+    try:
+        return os.path.isdir(path) and any(
+            e.endswith(".lance") for e in os.listdir(path))
+    except Exception:
+        return False
 
 
 class StoreError(RuntimeError):
