@@ -42,7 +42,7 @@ cd legalmind-pro
 ```
 
 - **Windows:** run `install.bat` (installs dependencies + desktop shortcut), then launch with `legalmind.bat`.
-- **macOS / Linux:** run `./install.sh`, then launch with `./legalmind.command` (double-click in Finder on macOS) or `python3 gui.py`.
+- **macOS / Linux:** run `./install.sh` — it installs the Python dependencies and, if Tesseract/Poppler/Tk are missing, **offers to install them for you** via Homebrew (macOS) or apt/dnf/pacman (Linux). Then launch with `./legalmind.command` (double-click in Finder on macOS) or `python3 gui.py`. Pass `-y` to accept all prompts.
 
 Or install dependencies manually with `pip install -r requirements.txt`.
 
