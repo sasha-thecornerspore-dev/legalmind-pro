@@ -16,7 +16,7 @@ LegalMind Pro is a Retrieval-Augmented Generation (RAG) system built for legal p
 - **Extracted-text fast path** — Ingest pre-extracted, de-duplicated text directly, skipping PDF rendering and OCR entirely
 - **Semantic search** — Find relevant passages using meaning, not just keywords
 - **Document type classification** — Auto-classifies filings (Motion, Order, Affidavit, Exhibit, etc.)
-- **Choice of AI provider** — Analyze results with a local **Ollama** model, your **Claude subscription** (via the Claude Code CLI — no API key, no per-token cost), the **Claude API**, or any **OpenAI-compatible** endpoint
+- **Choice of AI provider** — Defaults to your **Claude subscription** (Claude Code CLI — no API key, no per-token cost); also a local **Ollama** model, the **Claude API**, or any **OpenAI-compatible** endpoint
 - **Dark-themed GUI** — Professional desktop interface with real-time ingest progress
 - **CLI tools** — Command-line ingestor and query tool for power users
 - **MCP server** — Expose your legal database to Claude Desktop as a tool
@@ -218,7 +218,7 @@ LegalMind can expose your legal database as tools for Claude Desktop:
 
 Settings are saved to `settings.json` and can be changed in the GUI Settings tab:
 
-- **AI provider**: `ollama` (local), `claude-cli` (your Claude Pro/Max **subscription** via the [Claude Code](https://claude.com/claude-code) CLI — run `claude` once to log in), `claude` (Anthropic API key), or `openai` (any OpenAI-compatible endpoint)
+- **AI provider**: **defaults to `claude-cli`** — your Claude Pro/Max **subscription** via the [Claude Code](https://claude.com/claude-code) CLI (run `claude` once to log in; no API key, no per-token cost), falling back to local `ollama` if the CLI isn't installed. Also selectable: `claude` (Anthropic API key) and `openai` (any OpenAI-compatible endpoint).
 - **Ollama model**: Which local LLM to use for analysis (default: `gemma`)
 - **Tesseract path**: Path to `tesseract.exe` for OCR
 - **Poppler path**: Path to Poppler's `bin` directory for OCR

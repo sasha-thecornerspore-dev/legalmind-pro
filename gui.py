@@ -61,7 +61,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import store
 from store import list_cases, query_collection, VECTORS_DIR
 from core import (
-    classify_doc_type, VERSION, open_path,
+    classify_doc_type, VERSION, open_path, check_claude_cli,
     query_ollama, list_ollama_models, DEFAULT_OLLAMA_MODEL,
     get_tesseract_cmd, get_poppler_path, save_settings, _load_settings,
     query_llm, query_claude, query_openai, LLM_PROVIDERS,
@@ -488,7 +488,13 @@ class LegalMindApp:
         tk.Label(top_inner, text="Provider:", font=FONT, bg=BG_MID, fg=FG_DIM
                  ).pack(side="left", pady=8)
         saved = _load_settings()
-        self.llm_provider_var = tk.StringVar(value=saved.get("llm_provider", "ollama"))
+        # Default to the Claude subscription (Claude Code CLI) when it's
+        # available — no API key, no per-token cost — falling back to local
+        # Ollama otherwise. A saved preference always wins. API-key providers
+        # remain selectable in the dropdown.
+        _default_provider = "claude-cli" if check_claude_cli() else "ollama"
+        self.llm_provider_var = tk.StringVar(
+            value=saved.get("llm_provider", _default_provider))
         provider_combo = ttk.Combobox(top_inner, textvariable=self.llm_provider_var,
                                       values=LLM_PROVIDERS,
                                       width=11, state="readonly")
