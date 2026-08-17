@@ -29,7 +29,9 @@ def test_query_pipes_prompt_via_stdin(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
     out = core.query_claude_cli("analyze this evidence", model="sonnet")
     assert out == "the answer"
-    assert seen["args"][:2] == ["/usr/bin/claude", "-p"]
+    assert seen["args"][0] == "/usr/bin/claude"
+    assert "-p" in seen["args"]
+    assert "--bare" in seen["args"]                   # skips MCP auto-load
     assert "--model" in seen["args"] and "sonnet" in seen["args"]
     assert seen["input"] == "analyze this evidence"   # piped, not an argv
 

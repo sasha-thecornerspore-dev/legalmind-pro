@@ -53,7 +53,7 @@ logger = logging.getLogger("legalmind.core")
 # ── Version ──────────────────────────────────────────────────────────────────
 # Single source of truth. The in-app updater compares this against the latest
 # GitHub Release tag (see updater.py). Bump on every tagged release.
-VERSION = "11.4.0"
+VERSION = "11.4.1"
 
 # Repo the in-app updater checks for new releases. Forks can repoint it with
 # the LEGALMIND_REPO environment variable without editing source.
@@ -346,6 +346,30 @@ def check_claude_cli() -> bool:
     return bool(_claude_cli_path())
 
 
+# `--bare` tells the CLI to skip auto-loading MCP servers, hooks, skills,
+# plugins and CLAUDE.md. Without it, running `claude -p` from inside a project
+# that has a large MCP config (like this app's own folder) can take a long time
+# to start or appear to hang. It is used best-effort: if an installed CLI is too
+# old to know the flag, the call is retried without it.
+_CLAUDE_BARE = ["--bare"]
+
+
+def _is_unknown_flag_error(text: str) -> bool:
+    t = (text or "").lower()
+    return ("--bare" in t and ("unknown" in t or "unrecognized" in t
+                               or "invalid" in t or "unexpected" in t))
+
+
+def _claude_cli_args(exe: str, model: str, bare: bool) -> list:
+    args = [exe]
+    if bare:
+        args += _CLAUDE_BARE
+    args += ["-p"]
+    if model:
+        args += ["--model", model]
+    return args
+
+
 def query_claude_cli(prompt: str, model: str = DEFAULT_CLAUDE_CLI_MODEL,
                      timeout: int = 300) -> str:
     """Query Claude through the Claude Code CLI in print mode.
@@ -361,21 +385,23 @@ def query_claude_cli(prompt: str, model: str = DEFAULT_CLAUDE_CLI_MODEL,
         return ("Error: Claude Code CLI not found. Install it from "
                 "https://claude.com/claude-code, then run `claude` once to log "
                 "in with your subscription.")
-    args = [exe, "-p"]
-    if model:
-        args += ["--model", model]
-    try:
-        r = subprocess.run(args, input=prompt, capture_output=True, text=True,
-                           timeout=timeout, encoding="utf-8", errors="replace")
-    except subprocess.TimeoutExpired:
-        return "Error: Claude CLI timed out."
-    except Exception as e:
-        return f"Error launching Claude CLI: {e}"
-    if r.returncode != 0:
-        err = (r.stderr or "").strip()
-        return (f"Error from Claude CLI (exit {r.returncode}): "
-                f"{err or 'no output — are you logged in? run `claude` once.'}")
-    return (r.stdout or "").strip()
+    for bare in (True, False):   # try --bare, fall back if unsupported
+        try:
+            r = subprocess.run(_claude_cli_args(exe, model, bare), input=prompt,
+                               capture_output=True, text=True, timeout=timeout,
+                               encoding="utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            return ("Error: Claude CLI timed out. If this keeps happening, your "
+                    "machine may be busy, or the CLI is slow to start.")
+        except Exception as e:
+            return f"Error launching Claude CLI: {e}"
+        if r.returncode != 0 and bare and _is_unknown_flag_error(r.stderr):
+            continue   # this CLI doesn't know --bare; retry plainly
+        if r.returncode != 0:
+            err = (r.stderr or "").strip()
+            return (f"Error from Claude CLI (exit {r.returncode}): "
+                    f"{err or 'no output — are you logged in? run `claude` once.'}")
+        return (r.stdout or "").strip()
 
 
 def query_llm(prompt: str, provider: str = "ollama", model: str = "",
@@ -578,25 +604,33 @@ def query_claude_cli_stream(messages: list, on_token, model: str = DEFAULT_CLAUD
             parts.append(f"{tag}: {m.get('content', '')}")
         prompt = "\n\n".join(parts)
 
-    args = [exe, "-p"]
-    if model:
-        args += ["--model", model]
-
     acc = []
-    try:
+
+    def _stream_once(bare):
+        """Stream via on_token incrementally. Returns (n_emitted, rc, stderr)."""
         proc = subprocess.Popen(
-            args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            _claude_cli_args(exe, model, bare),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8",
             errors="replace", bufsize=1)
         proc.stdin.write(prompt)
         proc.stdin.close()
+        n = 0
         for chunk in proc.stdout:
             acc.append(chunk)
             on_token(chunk)
+            n += 1
         proc.wait(timeout=timeout)
-        if proc.returncode != 0:
-            err = (proc.stderr.read() or "").strip()
-            tail = f"\n[Claude CLI error: {err or proc.returncode}]"
+        return n, proc.returncode, (proc.stderr.read() or "").strip()
+
+    try:
+        n, rc, err = _stream_once(bare=True)
+        # A CLI too old for --bare fails at startup, before emitting anything;
+        # only then is it safe to retry without --bare (no double output).
+        if rc != 0 and n == 0 and _is_unknown_flag_error(err):
+            n, rc, err = _stream_once(bare=False)
+        if rc != 0:
+            tail = f"\n[Claude CLI error: {err or rc}]"
             on_token(tail)
             acc.append(tail)
     except Exception as e:

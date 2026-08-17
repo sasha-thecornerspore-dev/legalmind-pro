@@ -61,7 +61,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import store
 from store import list_cases, query_collection, VECTORS_DIR
 from core import (
-    classify_doc_type, VERSION, open_path, check_claude_cli,
+    classify_doc_type, VERSION, open_path, check_claude_cli, PROVIDER_LABELS,
     query_ollama, list_ollama_models, DEFAULT_OLLAMA_MODEL,
     get_tesseract_cmd, get_poppler_path, save_settings, _load_settings,
     query_llm, query_claude, query_openai, LLM_PROVIDERS,
@@ -490,18 +490,40 @@ class LegalMindApp:
         saved = _load_settings()
         # Default to the Claude subscription (Claude Code CLI) when it's
         # available — no API key, no per-token cost — falling back to local
-        # Ollama otherwise. A saved preference always wins. API-key providers
-        # remain selectable in the dropdown.
+        # Ollama otherwise. A saved preference always wins.
         _default_provider = "claude-cli" if check_claude_cli() else "ollama"
+
+        # The dropdown shows friendly LABELS, but llm_provider_var always holds
+        # the internal KEY (all dispatch reads the key). Showing raw keys let
+        # users pick "claude" (the API, needs a key) when they meant the
+        # subscription "claude-cli" — the two now read clearly apart.
+        self._provider_key_of = dict(PROVIDER_LABELS)          # key -> label
+        self._provider_label_to_key = {v: k for k, v in PROVIDER_LABELS.items()}
         self.llm_provider_var = tk.StringVar(
             value=saved.get("llm_provider", _default_provider))
-        provider_combo = ttk.Combobox(top_inner, textvariable=self.llm_provider_var,
-                                      values=LLM_PROVIDERS,
-                                      width=11, state="readonly")
+        self._provider_display_var = tk.StringVar(
+            value=self._provider_key_of.get(self.llm_provider_var.get(),
+                                            self.llm_provider_var.get()))
+        # Keep the visible label in sync whenever the key changes (e.g. loading
+        # a saved chat session), without re-firing selection.
+        self.llm_provider_var.trace_add(
+            "write", lambda *a: self._provider_display_var.set(
+                self._provider_key_of.get(self.llm_provider_var.get(),
+                                          self.llm_provider_var.get())))
+
+        provider_combo = ttk.Combobox(
+            top_inner, textvariable=self._provider_display_var,
+            values=[PROVIDER_LABELS[k] for k in LLM_PROVIDERS],
+            width=22, state="readonly")
         provider_combo.pack(side="left", padx=(6, 16), pady=8)
-        provider_combo.bind("<<ComboboxSelected>>",
-                            lambda e: self._persist_pref("llm_provider",
-                                                         self.llm_provider_var.get()))
+
+        def _on_provider_pick(_e):
+            key = self._provider_label_to_key.get(
+                self._provider_display_var.get())
+            if key:
+                self.llm_provider_var.set(key)
+                self._persist_pref("llm_provider", key)
+        provider_combo.bind("<<ComboboxSelected>>", _on_provider_pick)
 
         tk.Label(top_inner, text="Mode:", font=FONT, bg=BG_MID, fg=FG_DIM
                  ).pack(side="left", pady=8)
