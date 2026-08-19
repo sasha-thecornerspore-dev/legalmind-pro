@@ -53,7 +53,7 @@ logger = logging.getLogger("legalmind.core")
 # ── Version ──────────────────────────────────────────────────────────────────
 # Single source of truth. The in-app updater compares this against the latest
 # GitHub Release tag (see updater.py). Bump on every tagged release.
-VERSION = "11.4.1"
+VERSION = "11.4.2"
 
 # Repo the in-app updater checks for new releases. Forks can repoint it with
 # the LEGALMIND_REPO environment variable without editing source.
@@ -370,6 +370,22 @@ def _claude_cli_args(exe: str, model: str, bare: bool) -> list:
     return args
 
 
+def _claude_cli_env() -> dict:
+    """Environment for the subscription CLI call, with API-key vars removed.
+
+    If ANTHROPIC_API_KEY (or an auth token) is present, Claude Code bills
+    against the API instead of the subscription — which surfaces as
+    'Credit balance is too low' when the key has no credits. Stripping these
+    forces the CLI to use the logged-in Pro/Max subscription, which is the
+    whole point of this provider.
+    """
+    env = os.environ.copy()
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_BASE_URL", "CLAUDE_API_KEY"):
+        env.pop(var, None)
+    return env
+
+
 def query_claude_cli(prompt: str, model: str = DEFAULT_CLAUDE_CLI_MODEL,
                      timeout: int = 300) -> str:
     """Query Claude through the Claude Code CLI in print mode.
@@ -389,7 +405,8 @@ def query_claude_cli(prompt: str, model: str = DEFAULT_CLAUDE_CLI_MODEL,
         try:
             r = subprocess.run(_claude_cli_args(exe, model, bare), input=prompt,
                                capture_output=True, text=True, timeout=timeout,
-                               encoding="utf-8", errors="replace")
+                               encoding="utf-8", errors="replace",
+                               env=_claude_cli_env())
         except subprocess.TimeoutExpired:
             return ("Error: Claude CLI timed out. If this keeps happening, your "
                     "machine may be busy, or the CLI is slow to start.")
@@ -612,7 +629,7 @@ def query_claude_cli_stream(messages: list, on_token, model: str = DEFAULT_CLAUD
             _claude_cli_args(exe, model, bare),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8",
-            errors="replace", bufsize=1)
+            errors="replace", bufsize=1, env=_claude_cli_env())
         proc.stdin.write(prompt)
         proc.stdin.close()
         n = 0

@@ -71,3 +71,29 @@ def test_stream_flattens_and_emits(monkeypatch):
         [{"role": "user", "content": "summarize"}], got.append)
     assert "".join(got) == "Motion to dismiss."
     assert out == "Motion to dismiss."
+
+
+def test_subscription_env_strips_api_key(monkeypatch):
+    """The subscription CLI must not inherit ANTHROPIC_API_KEY, or Claude Code
+    bills the API ('Credit balance is too low') instead of the subscription."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-whatever")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok")
+    env = core._claude_cli_env()
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert "PATH" in env or "Path" in env   # real env otherwise preserved
+
+
+def test_query_passes_stripped_env(monkeypatch):
+    import subprocess, types
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-whatever")
+    seen = {}
+
+    def fake_run(args, input=None, env=None, **kw):
+        seen["env"] = env
+        return types.SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(core, "_claude_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    core.query_claude_cli("hi")
+    assert seen["env"] is not None and "ANTHROPIC_API_KEY" not in seen["env"]
