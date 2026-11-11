@@ -225,6 +225,31 @@ PROVIDER_LABELS = {
 }
 
 
+def model_for_provider(provider: str, settings: Optional[dict] = None) -> str:
+    """Model name the given provider should be called with.
+
+    Every provider reads ONLY its own setting. The routing mirrors
+    query_llm / query_llm_stream (anything unrecognised is Ollama), so a model
+    name can never leak from one provider into another -- the subscription CLI
+    used to fall through to the Ollama branch and get launched with
+    `--model gemma`.
+
+    For the Claude subscription CLI an empty result means "whatever Claude Code
+    is configured to use"; set `claude_cli_model` in settings.json (e.g.
+    "sonnet", "opus") to pin one.
+    """
+    if settings is None:
+        settings = _load_settings()
+    provider = (provider or "ollama").lower().strip()
+    if provider in ("claude-cli", "claude-subscription"):
+        return settings.get("claude_cli_model", DEFAULT_CLAUDE_CLI_MODEL)
+    if provider == "claude":
+        return settings.get("claude_model", DEFAULT_CLAUDE_MODEL)
+    if provider == "openai":
+        return settings.get("openai_model", DEFAULT_OPENAI_MODEL)
+    return settings.get("ollama_model", DEFAULT_OLLAMA_MODEL)
+
+
 def query_ollama(prompt: str, model: str = DEFAULT_OLLAMA_MODEL,
                  url: str = DEFAULT_OLLAMA_URL) -> str:
     """Send a prompt to a local Ollama instance and return the response."""
@@ -346,28 +371,50 @@ def check_claude_cli() -> bool:
     return bool(_claude_cli_path())
 
 
-# `--bare` tells the CLI to skip auto-loading MCP servers, hooks, skills,
-# plugins and CLAUDE.md. Without it, running `claude -p` from inside a project
-# that has a large MCP config (like this app's own folder) can take a long time
-# to start or appear to hang. It is used best-effort: if an installed CLI is too
-# old to know the flag, the call is retried without it.
-_CLAUDE_BARE = ["--bare"]
+# `--strict-mcp-config` with no `--mcp-config` tells the CLI to load no MCP
+# servers. Without it, running `claude -p` from inside a project that has a
+# large MCP config (like this app's own folder) can take a long time to start
+# or appear to hang. It is used best-effort: if an installed CLI is too old to
+# know the flag, the call is retried without it.
+#
+# Do NOT use `--bare` for this. It skips MCP loading too, but it also makes
+# Claude Code ignore OAuth and the keychain ("Anthropic auth is strictly
+# ANTHROPIC_API_KEY or apiKeyHelper"). The subscription login is never read,
+# and since _claude_cli_env() strips the API key as well, every single call
+# answers "Not logged in" no matter how many times the user signs in.
+_CLAUDE_LEAN = ["--strict-mcp-config"]
 
 
 def _is_unknown_flag_error(text: str) -> bool:
     t = (text or "").lower()
-    return ("--bare" in t and ("unknown" in t or "unrecognized" in t
-                               or "invalid" in t or "unexpected" in t))
+    return (any(flag in t for flag in _CLAUDE_LEAN)
+            and ("unknown" in t or "unrecognized" in t
+                 or "invalid" in t or "unexpected" in t))
 
 
-def _claude_cli_args(exe: str, model: str, bare: bool) -> list:
+def _claude_cli_args(exe: str, model: str, lean: bool) -> list:
     args = [exe]
-    if bare:
-        args += _CLAUDE_BARE
+    if lean:
+        args += _CLAUDE_LEAN
     args += ["-p"]
     if model:
         args += ["--model", model]
     return args
+
+
+# The CLI reports a missing login as "Not logged in · Please run /login" on
+# STDOUT (stderr stays empty). "/login" means nothing inside this app, so the
+# raw text is replaced/followed by where to actually type it.
+CLAUDE_CLI_LOGIN_HELP = (
+    "Claude Code is not signed in, so LegalMind cannot use your Claude "
+    "subscription yet. Open a terminal (PowerShell or Command Prompt), run "
+    "`claude`, type /login and finish signing in with your Claude account. "
+    "Then send your message again -- or pick a different Provider above.")
+
+
+def _is_not_logged_in(text: str) -> bool:
+    t = (text or "").lower()
+    return "not logged in" in t or "please run /login" in t
 
 
 def _claude_cli_env() -> dict:
@@ -401,9 +448,9 @@ def query_claude_cli(prompt: str, model: str = DEFAULT_CLAUDE_CLI_MODEL,
         return ("Error: Claude Code CLI not found. Install it from "
                 "https://claude.com/claude-code, then run `claude` once to log "
                 "in with your subscription.")
-    for bare in (True, False):   # try --bare, fall back if unsupported
+    for lean in (True, False):   # try the lean flags, fall back if unsupported
         try:
-            r = subprocess.run(_claude_cli_args(exe, model, bare), input=prompt,
+            r = subprocess.run(_claude_cli_args(exe, model, lean), input=prompt,
                                capture_output=True, text=True, timeout=timeout,
                                encoding="utf-8", errors="replace",
                                env=_claude_cli_env())
@@ -412,10 +459,13 @@ def query_claude_cli(prompt: str, model: str = DEFAULT_CLAUDE_CLI_MODEL,
                     "machine may be busy, or the CLI is slow to start.")
         except Exception as e:
             return f"Error launching Claude CLI: {e}"
-        if r.returncode != 0 and bare and _is_unknown_flag_error(r.stderr):
-            continue   # this CLI doesn't know --bare; retry plainly
+        if r.returncode != 0 and lean and _is_unknown_flag_error(r.stderr):
+            continue   # this CLI doesn't know the lean flags; retry plainly
         if r.returncode != 0:
-            err = (r.stderr or "").strip()
+            # The CLI puts some failures (notably "Not logged in") on stdout.
+            err = (r.stderr or "").strip() or (r.stdout or "").strip()
+            if _is_not_logged_in(err):
+                return f"Error: {CLAUDE_CLI_LOGIN_HELP}"
             return (f"Error from Claude CLI (exit {r.returncode}): "
                     f"{err or 'no output — are you logged in? run `claude` once.'}")
         return (r.stdout or "").strip()
@@ -623,10 +673,10 @@ def query_claude_cli_stream(messages: list, on_token, model: str = DEFAULT_CLAUD
 
     acc = []
 
-    def _stream_once(bare):
+    def _stream_once(lean):
         """Stream via on_token incrementally. Returns (n_emitted, rc, stderr)."""
         proc = subprocess.Popen(
-            _claude_cli_args(exe, model, bare),
+            _claude_cli_args(exe, model, lean),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8",
             errors="replace", bufsize=1, env=_claude_cli_env())
@@ -641,13 +691,19 @@ def query_claude_cli_stream(messages: list, on_token, model: str = DEFAULT_CLAUD
         return n, proc.returncode, (proc.stderr.read() or "").strip()
 
     try:
-        n, rc, err = _stream_once(bare=True)
-        # A CLI too old for --bare fails at startup, before emitting anything;
-        # only then is it safe to retry without --bare (no double output).
+        n, rc, err = _stream_once(lean=True)
+        # A CLI too old for the lean flags fails at startup, before emitting
+        # anything; only then is it safe to retry without them (no double
+        # output).
         if rc != 0 and n == 0 and _is_unknown_flag_error(err):
-            n, rc, err = _stream_once(bare=False)
+            n, rc, err = _stream_once(lean=False)
         if rc != 0:
-            tail = f"\n[Claude CLI error: {err or rc}]"
+            # "Not logged in" arrives on stdout, so it has already been shown;
+            # follow it with what to actually do rather than a bare exit code.
+            if _is_not_logged_in(err) or _is_not_logged_in("".join(acc)):
+                tail = f"\n[{CLAUDE_CLI_LOGIN_HELP}]"
+            else:
+                tail = f"\n[Claude CLI error: {err or rc}]"
             on_token(tail)
             acc.append(tail)
     except Exception as e:
