@@ -68,6 +68,7 @@ from core import (
     ANALYSIS_MODES, get_analysis_prompt,
     DEFAULT_CLAUDE_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_OPENAI_URL,
     query_llm_stream, query_claude_messages, query_openai_messages,
+    model_for_provider,
 )
 
 
@@ -967,12 +968,7 @@ class LegalMindApp:
 
         # Resolve model + behavior settings
         saved_settings = _load_settings()
-        if provider == "claude":
-            model = saved_settings.get("claude_model", DEFAULT_CLAUDE_MODEL)
-        elif provider == "openai":
-            model = saved_settings.get("openai_model", DEFAULT_OPENAI_MODEL)
-        else:
-            model = saved_settings.get("ollama_model", DEFAULT_OLLAMA_MODEL)
+        model = model_for_provider(provider, saved_settings)
 
         use_stream = bool(saved_settings.get("streaming_enabled", True))
 
@@ -2041,9 +2037,12 @@ class LegalMindApp:
 
         tk.Label(inner, text="Default Provider:", font=FONT, bg=BG, fg=FG
                  ).grid(row=row, column=0, sticky="w", pady=6)
-        self._settings_provider_var = tk.StringVar(value=saved.get("llm_provider", "ollama"))
+        # Same provider list and same effective default as the Chat tab's
+        # dropdown -- this one used to omit "claude-cli" and claim "ollama".
+        self._settings_provider_var = tk.StringVar(
+            value=saved.get("llm_provider", self.llm_provider_var.get()))
         prov_combo = ttk.Combobox(inner, textvariable=self._settings_provider_var,
-                                   values=["ollama", "claude", "openai"], width=12, state="readonly")
+                                   values=list(LLM_PROVIDERS), width=12, state="readonly")
         prov_combo.grid(row=row, column=1, sticky="w", padx=(10, 0), pady=6)
         def save_provider(*_):
             save_settings({"llm_provider": self._settings_provider_var.get()})
