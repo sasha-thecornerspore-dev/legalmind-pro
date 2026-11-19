@@ -2235,7 +2235,16 @@ class LegalMindApp:
         self._log("INGEST COMPLETE", "success")
         self._log(f"  Files processed: {result.files_processed}", "success")
         self._log(f"  Files skipped:   {result.files_skipped} (already indexed)", "info")
+        if getattr(result, "files_retried", 0):
+            self._log(f"  Files re-read:   {result.files_retried} (pages OCR "
+                      f"could not read before)", "success")
         self._log(f"  Total chunks:    {result.total_chunks}", "success")
+        if getattr(result, "unread_pages", 0):
+            self._log(f"  NOT SEARCHABLE:  {result.unread_pages} page(s) in "
+                      f"{result.unread_files} file(s) had no readable text. "
+                      f"A search will not find what is on them. They will be "
+                      f"re-read automatically on the next ingest once OCR can "
+                      f"read them (see Settings > OCR).", "error")
         self._log(f"  Time elapsed:    {result.elapsed:.1f}s", "info")
         if result.errors:
             self._log(f"  Errors:          {len(result.errors)}", "error")

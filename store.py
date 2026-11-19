@@ -10,6 +10,7 @@ namespace package, because the app runs with the repo as its cwd.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import logging
 import os
 import uuid
@@ -581,6 +582,7 @@ def delete_case(case_name: str) -> int:
     if FILES_TABLE in names:
         db.open_table(FILES_TABLE).delete(f"case_key = '{key}'")
 
+    drop_unread_pages(case_name)
     logger.info("Deleted case '%s' (%d chunks).", case_name, removed)
     return removed
 
@@ -607,9 +609,82 @@ def rename_case(old_name: str, new_name: str) -> int:
         db.open_table(FILES_TABLE).update(
             where=f"case_key = '{old_key}'", values=values)
 
+    rename_unread_pages(old_name, new_name)
     logger.info("Renamed case '%s' -> '%s' (%d chunks).",
                 old_name, new_name, affected)
     return affected
+
+
+# ── Pages that could not be read ────────────────────────────────────────────
+# A page with no readable text (a scan without OCR, or a broken text layer
+# OCR could not fix) is not indexed. It is recorded here instead, per case and
+# file, so the app can say how much of the record is NOT searchable, and can
+# re-read those files once OCR works. Kept as a small JSON file inside the
+# database folder, so it moves with the database.
+UNREAD_PAGES_FILE = "unread_pages.json"
+
+
+def _unread_path() -> str:
+    return os.path.join(VECTORS_DIR, UNREAD_PAGES_FILE)
+
+
+def _load_unread() -> dict:
+    try:
+        with open(_unread_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        logger.warning("Could not read %s: %s", _unread_path(), e)
+        return {}
+
+
+def _save_unread(data: dict) -> None:
+    os.makedirs(VECTORS_DIR, exist_ok=True)
+    tmp = _unread_path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+    os.replace(tmp, _unread_path())
+
+
+def unread_pages(case_name: str) -> dict:
+    """{source_path: [page, ...]} of unreadable pages recorded for a case."""
+    return {k: list(v) for k, v in
+            _load_unread().get(normalize_case(case_name), {}).items()}
+
+
+def record_unread_pages(case_name: str, source_path: str, pages) -> None:
+    """Set the unreadable pages of one file (an empty list clears it)."""
+    data = _load_unread()
+    key = normalize_case(case_name)
+    files = data.get(key, {})
+    pages = sorted({int(p) for p in pages or []})
+    if pages:
+        files[source_path] = pages
+    elif source_path in files:
+        files.pop(source_path)
+    else:
+        return                      # nothing recorded and nothing to clear
+    if files:
+        data[key] = files
+    else:
+        data.pop(key, None)
+    _save_unread(data)
+
+
+def drop_unread_pages(case_name: str) -> None:
+    data = _load_unread()
+    if data.pop(normalize_case(case_name), None) is not None:
+        _save_unread(data)
+
+
+def rename_unread_pages(old_name: str, new_name: str) -> None:
+    data = _load_unread()
+    old, new = normalize_case(old_name), normalize_case(new_name)
+    if old in data and old != new:
+        data[new] = {**data.get(new, {}), **data.pop(old)}
+        _save_unread(data)
 
 
 def clone_case(src_name: str, new_name: str) -> int:
