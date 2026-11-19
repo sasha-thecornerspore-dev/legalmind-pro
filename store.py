@@ -76,6 +76,211 @@ def looks_like_store(path: str) -> bool:
         return False
 
 
+# ── Finding existing databases on this machine ──────────────────────────────
+# A fresh install (or an unzipped new release) starts with its own empty
+# `vectors/` folder, so the user's real cases seem to have vanished. These
+# helpers search the computer for existing stores so the GUI can offer to
+# reconnect one. They only read; nothing is moved or copied.
+
+# Folder names never worth descending into: OS/system areas, package caches
+# and build output. Compared case-insensitively. Names starting with "." or
+# "$" (hidden folders, $Recycle.Bin, $WinREAgent ...) are skipped as well.
+_SEARCH_SKIP_DIRS = {
+    "windows", "program files", "program files (x86)", "programdata",
+    "appdata", "system volume information", "recovery", "perflogs",
+    "msocache", "intel", "amd", "nvidia",
+    "node_modules", "__pycache__", "site-packages", "dist-packages",
+    "venv", "env", "build", "dist", "target",
+    "library", "system", "applications", "proc", "sys", "dev", "usr",
+    "bin", "sbin", "etc", "var", "opt", "snap", "boot", "lib", "lib64",
+}
+
+
+def _windows_user_folders() -> list[str]:
+    """Documents / Desktop / Downloads as Windows has them -- often moved to
+    another drive or into OneDrive, so ~/Documents is not enough."""
+    out = []
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders")
+        for name in ("Personal", "Desktop",
+                     "{374DE290-123F-4565-9164-39C4925E467B}"):   # Downloads
+            try:
+                out.append(os.path.expandvars(winreg.QueryValueEx(key, name)[0]))
+            except OSError:
+                pass
+    except Exception:
+        pass
+    return out
+
+
+def default_search_roots() -> list[str]:
+    """Where to look for existing stores, most likely places first so a
+    store in the user's own folders shows up within seconds:
+
+      1. the home folder, the (possibly relocated) Documents/Desktop/Downloads,
+         `<drive>:\\Users\\<name>` on every drive, and the folder holding this
+         install;
+      2. then every fixed drive (Windows) or mounted volumes (macOS/Linux).
+
+    find_stores() never walks a folder twice, so the overlap is free.
+    """
+    likely = [os.path.expanduser("~")]
+    drives: list[str] = []
+    if os.name == "nt":
+        import ctypes
+        import string
+        drive_fixed = 3
+        for letter in string.ascii_uppercase:
+            root = f"{letter}:\\"
+            try:
+                is_fixed = ctypes.windll.kernel32.GetDriveTypeW(root) == drive_fixed
+            except Exception:
+                is_fixed = os.path.isdir(root)
+            if is_fixed and os.path.isdir(root):
+                drives.append(root)
+        likely += _windows_user_folders()
+        user = os.path.basename(os.path.expanduser("~"))
+        likely += [os.path.join(d, "Users", user) for d in drives]
+    else:
+        drives += [p for p in ("/Volumes", "/mnt", "/media") if os.path.isdir(p)]
+    likely.append(os.path.dirname(os.path.dirname(os.path.abspath(BASE_DIR))))
+
+    roots: list[str] = []
+    seen: set[str] = set()
+    for p in likely + drives:
+        key = os.path.normcase(os.path.abspath(p))
+        if key not in seen and os.path.isdir(p):
+            seen.add(key)
+            roots.append(p)
+    return roots
+
+
+def find_stores(roots: list[str] | None = None, *, max_depth: int = 8,
+                on_found=None, on_progress=None, should_stop=None,
+                progress_every: int = 250) -> list[str]:
+    """Walk `roots` (default: default_search_roots()) and return every folder
+    that looks_like_store().
+
+    - Never descends into a store, nor into '*.lance' table folders (a big
+      store holds tens of thousands of files), symlinks or junctions.
+    - on_found(path) is called as each store is found; on_progress(n, path)
+      every `progress_every` folders; should_stop() is polled so a GUI can
+      cancel. Unreadable folders are skipped silently.
+    """
+    if roots is None:
+        roots = default_search_roots()
+    found: list[str] = []
+    seen: set[str] = set()       # stores already reported
+    visited: set[str] = set()    # folders already walked (roots may overlap)
+    stack = [(os.path.abspath(r), 0) for r in reversed(roots)]
+    checked = 0
+    while stack:
+        if should_stop and should_stop():
+            break
+        path, depth = stack.pop()
+        key = os.path.normcase(path)
+        if key in visited:
+            continue
+        visited.add(key)
+        try:
+            with os.scandir(path) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        checked += 1
+        if on_progress and checked % progress_every == 0:
+            try:
+                on_progress(checked, path)
+            except Exception:
+                pass
+
+        if any(e.name.endswith(".lance") for e in entries):
+            key = os.path.normcase(os.path.realpath(path))
+            if key not in seen:
+                seen.add(key)
+                found.append(path)
+                logger.info("Found a LanceDB store at %s", path)
+                if on_found:
+                    try:
+                        on_found(path)
+                    except Exception:
+                        pass
+            continue        # never look inside a store
+
+        if depth >= max_depth:
+            continue
+        subdirs = []
+        for e in entries:
+            name = e.name
+            if (name.startswith((".", "$")) or name.endswith(".lance")
+                    or name.lower() in _SEARCH_SKIP_DIRS):
+                continue
+            try:
+                if not e.is_dir(follow_symlinks=False) or e.is_symlink():
+                    continue
+                if getattr(e, "is_junction", lambda: False)():
+                    continue
+            except OSError:
+                continue
+            subdirs.append(e.path)
+        # Reverse so folders are visited in alphabetical order.
+        for sub in sorted(subdirs, key=str.lower, reverse=True):
+            stack.append((sub, depth + 1))
+    if on_progress:
+        try:
+            on_progress(checked, "")
+        except Exception:
+            pass
+    return found
+
+
+def describe_store(path: str) -> dict:
+    """Summarise a store WITHOUT making it the active one.
+
+    Returns {path, is_legalmind, chunks, files, cases, updated, error}.
+    Case names come from the small ingest manifest, not the (possibly huge)
+    chunks table, so this stays quick even for a multi-gigabyte store.
+    """
+    info = {"path": os.path.abspath(path), "is_legalmind": False,
+            "chunks": None, "files": None, "cases": [], "updated": "",
+            "error": ""}
+    try:
+        import lancedb
+        db = lancedb.connect(info["path"])     # separate from the cached _db
+        names = db.list_tables().tables
+        info["is_legalmind"] = CHUNKS_TABLE in names
+        if CHUNKS_TABLE in names:
+            info["chunks"] = db.open_table(CHUNKS_TABLE).count_rows()
+        if FILES_TABLE in names:
+            tbl = db.open_table(FILES_TABLE)
+            info["files"] = tbl.count_rows()
+            arr = (tbl.search().select(["case_name", "case_key"])
+                      .limit(None).to_arrow())
+            by_key: dict[str, str] = {}
+            for raw, key in zip(arr.column("case_name").to_pylist(),
+                                arr.column("case_key").to_pylist()):
+                by_key.setdefault(key, raw)
+            info["cases"] = sorted(by_key.values(), key=lambda s: (s or "").lower())
+        # Each write adds a file under <table>.lance/_versions, so that
+        # folder's mtime is the store's last-updated time.
+        stamps = []
+        for name in os.listdir(info["path"]):
+            if name.endswith(".lance"):
+                versions = os.path.join(info["path"], name, "_versions")
+                target = versions if os.path.isdir(versions) else os.path.join(
+                    info["path"], name)
+                stamps.append(os.path.getmtime(target))
+        if stamps:
+            info["updated"] = _dt.datetime.fromtimestamp(max(stamps)).strftime(
+                "%Y-%m-%d %H:%M")
+    except Exception as e:
+        info["error"] = str(e)
+    return info
+
+
 class StoreError(RuntimeError):
     """Raised when the vector store is unreachable or inconsistent.
 
