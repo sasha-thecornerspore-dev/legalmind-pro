@@ -38,6 +38,7 @@ from core import (
     classify_doc_type, get_tesseract_cmd, get_poppler_path,
 )
 import store
+import winocr
 
 # ── Logging setup ──────────────────────────────────────────────────────────
 LOG_FILE = os.path.join(BASE_DIR, "legalmind.log")
@@ -63,6 +64,7 @@ if not logger.handlers:
 # ── OCR helpers (optional — graceful degradation) ────────────────────────────
 _ocr_available = None
 _ocr_status = ""  # human-readable status for the GUI
+_ocr_backend = ""  # "tesseract" | "windows" (built-in Windows OCR) | ""
 
 
 def check_ocr() -> bool:
@@ -70,7 +72,7 @@ def check_ocr() -> bool:
 
     Sets _ocr_status with a human-readable explanation of what's missing.
     """
-    global _ocr_available, _ocr_status
+    global _ocr_available, _ocr_status, _ocr_backend
     if _ocr_available is not None:
         return _ocr_available
 
@@ -153,14 +155,26 @@ def check_ocr() -> bool:
                 "  Extract and set the path in Settings -> Poppler Path"
             )
 
-    if issues:
-        _ocr_available = False
-        _ocr_status = "OCR unavailable:\n" + "\n".join(f"  • {i}" for i in issues)
-        logger.info("OCR check: UNAVAILABLE -- %s", "; ".join(issues))
-    else:
+    if not issues:
         _ocr_available = True
+        _ocr_backend = "tesseract"
         _ocr_status = "OCR ready (Tesseract + Poppler)"
         logger.info("OCR check: READY (Tesseract + Poppler)")
+    elif winocr.available():
+        # No Tesseract/Poppler: fall back to the OCR engine built into
+        # Windows. Without this, every scanned page was silently dropped and
+        # every page with a broken text layer was skipped.
+        _ocr_available = True
+        _ocr_backend = "windows"
+        _ocr_status = ("OCR ready (built-in Windows OCR). Tesseract is not "
+                       "installed; that is fine.")
+        logger.info("OCR check: READY (built-in Windows OCR; Tesseract/Poppler "
+                    "not used: %s)", "; ".join(i.splitlines()[0] for i in issues))
+    else:
+        _ocr_available = False
+        _ocr_backend = ""
+        _ocr_status = "OCR unavailable:\n" + "\n".join(f"  • {i}" for i in issues)
+        logger.info("OCR check: UNAVAILABLE -- %s", "; ".join(issues))
 
     return _ocr_available
 
@@ -188,6 +202,8 @@ def ocr_page(pdf_path: str, page_num: int, dpi: int = 200) -> str:
     Default DPI lowered from 300 to 200 to reduce memory usage
     while maintaining acceptable OCR quality for legal docs.
     """
+    if _ocr_backend == "windows":
+        return winocr.ocr_pdf_page(pdf_path, page_num)
     import pytesseract
     from pdf2image import convert_from_path
 
@@ -276,6 +292,9 @@ class IngestResult:
     files_skipped: int = 0
     total_chunks: int = 0
     ocr_files: int = 0
+    unread_pages: int = 0     # pages no text could be read from (need OCR)
+    unread_files: int = 0     # files containing such pages
+    files_retried: int = 0    # files redone because OCR can now read them
     errors: list = field(default_factory=list)
     elapsed: float = 0.0
 
@@ -317,7 +336,8 @@ def get_existing_sources(case_name: str,
 
 def extract_pdf_pages(pdf_path: str, use_ocr: bool = True,
                       progress_cb: Callable = _noop_cb,
-                      file_index: int = 0, total_files: int = 0) -> list[dict]:
+                      file_index: int = 0, total_files: int = 0,
+                      unread_out: Optional[list] = None) -> list[dict]:
     """
     Extract text from each page of a PDF.
     Returns a list of dicts: [{"page": 1, "text": "..."}, ...]
@@ -354,7 +374,9 @@ def extract_pdf_pages(pdf_path: str, use_ocr: bool = True,
             #      indexed as gibberish, which is worse than missing: they
             #      pollute retrieval and look like real content.
             garbled = looks_garbled(text)
-            if (text_len < 40 or garbled) and use_ocr and check_ocr():
+            needs_ocr = text_len < 40 or garbled
+            ocr_ok = False
+            if needs_ocr and use_ocr and check_ocr():
                 reason = "garbled text layer" if garbled else f"only {text_len} chars"
                 logger.debug("  Page %d: %s — trying OCR...", page_num, reason)
                 progress_cb(IngestProgress(
@@ -368,6 +390,7 @@ def extract_pdf_pages(pdf_path: str, use_ocr: bool = True,
                 ))
                 try:
                     ocr_text = ocr_page(pdf_path, page_num)
+                    ocr_ok = True
                     # For a garbled page, ANY readable OCR output beats the
                     # existing text even if it is shorter -- length is not the
                     # test, readability is.
@@ -381,12 +404,25 @@ def extract_pdf_pages(pdf_path: str, use_ocr: bool = True,
                 except Exception as e:
                     logger.warning("  Page %d: OCR failed: %s", page_num, e)
 
-            if text.strip() and not looks_garbled(text):
+            kept = bool(text.strip()) and not looks_garbled(text)
+            if kept:
                 pages.append({"page": page_num, "text": text})
             elif text.strip():
                 logger.warning("  %s p.%d: unreadable text layer and OCR could "
                                "not recover it — skipping rather than indexing "
                                "noise.", fname, page_num)
+
+            # A page whose text could not be read is RECORDED, never silently
+            # lost: a search that finds nothing must not be mistaken for
+            # "not in the record". A blank page that OCR looked at and found
+            # empty is not counted.
+            if needs_ocr and (not ocr_ok or (garbled and not kept)):
+                if unread_out is not None:
+                    unread_out.append(page_num)
+                if not ocr_ok and not garbled:
+                    logger.warning("  %s p.%d: scanned page with no text layer "
+                                   "and no OCR -- recorded so it is retried once "
+                                   "OCR is available.", fname, page_num)
 
             # Yield GIL between pages so UI stays responsive
             time.sleep(0.005)
@@ -496,8 +532,27 @@ def ingest_folder(
         message=f"Found {len(all_pdfs)} PDF(s). Checking which are already indexed...",
         total_files=len(all_pdfs),
     ))
-    existing = get_existing_sources(case_name, progress_cb=progress_cb)
+    existing = set(get_existing_sources(case_name, progress_cb=progress_cb))
     logger.info("Existing index has %d unique source paths", len(existing))
+
+    # Files indexed earlier with pages that could not be read: redo them now
+    # if OCR can read those pages. Their old chunks and manifest row are
+    # removed first, so nothing is duplicated.
+    if use_ocr:
+        pending = store.unread_pages(case_name)
+        retry = [p for p in all_pdfs if p in pending and p in existing]
+        if retry and check_ocr():
+            logger.info("Retrying %d file(s) with %d page(s) that could not be "
+                        "read last time (OCR is available now).", len(retry),
+                        sum(len(pending[p]) for p in retry))
+            progress_cb(IngestProgress(
+                phase="scanning",
+                message=f"Re-reading {len(retry)} file(s) whose pages needed OCR...",
+            ))
+            for p in retry:
+                store.forget_file(case_name, p)
+                existing.discard(p)
+            result.files_retried = len(retry)
     new_pdfs = [p for p in all_pdfs if p not in existing]
     result.files_skipped = len(all_pdfs) - len(new_pdfs)
 
@@ -637,6 +692,7 @@ def ingest_folder(
             total_files=len(new_pdfs),
         ))
 
+        unread: list = []
         try:
             pages = extract_pdf_pages(
                 pdf_path,
@@ -644,7 +700,11 @@ def ingest_folder(
                 progress_cb=progress_cb,
                 file_index=i,
                 total_files=len(new_pdfs),
+                unread_out=unread,
             )
+            if unread:
+                result.unread_pages += len(unread)
+                result.unread_files += 1
 
             if not pages:
                 # Deliberately NOT marked ingested, so it is retried next
@@ -688,6 +748,7 @@ def ingest_folder(
             # run redoes it.
             _flush_embed_buffer()
             store.mark_file_ingested(case_name, pdf_path, file_chunks)
+            store.record_unread_pages(case_name, pdf_path, unread)
 
             result.files_processed += 1
             logger.info("  -> %d chunks from %s (total embedded: %d)",
@@ -752,6 +813,13 @@ def ingest_folder(
     logger.info("=== Ingest complete: %d files, %d skipped, %d chunks, %.1fs, %d errors ===",
                 result.files_processed, result.files_skipped, result.total_chunks,
                 result.elapsed, len(result.errors))
+    if result.unread_pages:
+        logger.warning("%d page(s) in %d file(s) had no readable text (OCR %s). "
+                       "They are recorded and will be re-read automatically on "
+                       "the next ingest once OCR can read them.",
+                       result.unread_pages, result.unread_files,
+                       "could not read them" if (use_ocr and check_ocr())
+                       else "unavailable")
     progress_cb(IngestProgress(
         phase="done",
         message=(
