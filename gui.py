@@ -68,7 +68,8 @@ from core import (
     ANALYSIS_MODES, get_analysis_prompt,
     DEFAULT_CLAUDE_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_OPENAI_URL,
     query_llm_stream, query_claude_messages, query_openai_messages,
-    model_for_provider,
+    model_for_provider, claude_cli_auth_status, start_claude_login,
+    CLAUDE_CLI_LOGIN_HELP, CLAUDE_CODE_INSTALL_URL,
 )
 
 
@@ -245,6 +246,11 @@ class LegalMindApp:
         self._attached_files = []     # list of {"name": str, "text": str, "path": str}
         self._preview_visible = False
         self._current_session_path = None  # path of the autosaved session, if any
+        self._last_case_count = 0          # cases in the active database
+        self._case_list_error = None       # set when the case list can't be read
+        self._claude_prompted = False      # asked about Claude sign-in this run
+        self._claude_login_polling = False # waiting for a sign-in to finish
+        self._db_finder = None             # the "Find databases" window, if open
 
         # Header bar
         header = tk.Frame(root, bg=BG_MID, height=56)
@@ -294,8 +300,9 @@ class LegalMindApp:
                                        font=FONT_SMALL, bg=BG_MID, fg=FG_MUTED, padx=16)
         self.status_version.pack(side="right")
 
-        # Load initial data
-        self.root.after(500, self._refresh_case_lists)
+        # Load initial data, then offer to find an existing database and to
+        # sign in to Claude (one prompt at a time -- see _startup_checks).
+        self.root.after(500, self._startup_checks)
 
         # Check for a newer release in the background (non-blocking, silent
         # when up to date). Delayed so it never competes with startup.
@@ -418,38 +425,417 @@ class LegalMindApp:
             return
         open_path(log_path)
 
-    def _change_db_location(self):
-        """Point the app at a different database folder (e.g. an existing one
-        after a fresh install). Persists the choice and reloads the cases."""
+    # -- Startup checks --------------------------------------------------------
+    def _startup_checks(self):
+        """Runs once, after the window is up: load the cases, then offer to
+        find an existing database (fresh install with no cases), then offer
+        to sign in to Claude. Each prompt waits for the previous one, so two
+        dialogs never stack."""
+        self._refresh_case_lists()
+        self._maybe_offer_db_search(then=self._maybe_prompt_claude_login)
+
+    # -- Database location / finder ---------------------------------------------
+    def _change_db_location(self) -> bool:
+        """Point the app at a database folder picked by hand. Returns True if
+        it switched."""
         import store
         current = store.VECTORS_DIR
         chosen = filedialog.askdirectory(
             title="Select the LegalMind database folder",
             initialdir=current if os.path.isdir(current) else os.path.expanduser("~"))
         if not chosen:
-            return
+            return False
+        return self._connect_db(chosen)
+
+    def _connect_db(self, path: str, parent=None, then=None) -> bool:
+        """Switch to the database at `path`, persist the choice, and reload
+        the cases in the background (a large store can take a while to read
+        the first time). then() runs after the result has been shown."""
+        import store
+        if self._ingest_running:
+            messagebox.showwarning(
+                "Database", "An ingestion is running. Wait for it to finish "
+                "(or stop it) before switching databases.", parent=parent)
+            return False
         try:
-            store.set_vectors_dir(chosen)
-            cases = store.list_cases()
+            store.set_vectors_dir(path)
         except Exception as e:
             messagebox.showerror(
-                "Database", f"Could not open that folder as a database:\n{e}")
-            return
+                "Database", f"Could not use that folder as a database:\n{e}",
+                parent=parent)
+            return False
         self.db_path_label.configure(text=store.VECTORS_DIR)
-        self._refresh_case_lists()
-        n = len(cases)
-        total = sum(c.get("chunks", 0) for c in cases)
-        if n:
-            messagebox.showinfo(
-                "Database changed",
-                f"Now using:\n{store.VECTORS_DIR}\n\n"
-                f"Found {n} case(s), {total:,} chunks.")
+        self.query_case_var.set("")
+        self.cases_status.configure(text="Loading cases from the database...")
+        self._update_status("Loading cases from the database...")
+
+        def run():
+            try:
+                cases, err = store.list_cases(), None
+            except Exception as e:
+                logger.error("Reading cases from %s failed: %s", path, e,
+                             exc_info=True)
+                cases, err = [], e
+
+            def show():
+                self._case_list_error = err
+                self._apply_case_list(cases)
+                n = len(cases)
+                total = sum(c.get("chunks", 0) for c in cases)
+                if err:
+                    messagebox.showerror(
+                        "Database", f"Now using:\n{store.VECTORS_DIR}\n\n"
+                        f"but its cases could not be read:\n{err}")
+                elif n:
+                    messagebox.showinfo(
+                        "Database connected",
+                        f"Now using:\n{store.VECTORS_DIR}\n\n"
+                        f"Found {n} case(s), {total:,} chunks.")
+                else:
+                    hint = ("" if store.looks_like_store(store.VECTORS_DIR) else
+                            "\n\n(No existing index here yet -- it will be "
+                            "created on first ingest.)")
+                    messagebox.showinfo(
+                        "Database connected",
+                        f"Now using:\n{store.VECTORS_DIR}{hint}")
+                if then:
+                    then()
+            self.root.after(0, show)
+
+        threading.Thread(target=run, daemon=True, name="db-connect").start()
+        return True
+
+    def _maybe_offer_db_search(self, then=None):
+        """On a fresh install the database is empty and the user's cases look
+        lost. Offer -- once per install -- to search the computer for them."""
+        then = then or (lambda: None)
+        if (self._last_case_count or self._case_list_error
+                or os.environ.get("LEGALMIND_VECTORS")
+                or _load_settings().get("db_search_offered")):
+            then()
+            return
+        self._persist_pref("db_search_offered", True)
+        if messagebox.askyesno(
+                "Find your cases?",
+                "This LegalMind database has no cases yet.\n\n"
+                "If you have used LegalMind on this computer before (for "
+                "example an older version), your cases are probably still in "
+                "another folder. Search this computer for them now?\n\n"
+                "You can also do this later: Cases tab > Find Databases."):
+            self._open_db_finder(on_close=then)
         else:
-            hint = ("" if store.looks_like_store(chosen) else
-                    "\n\n(No existing index here yet — it will be created on "
-                    "first ingest.)")
-            messagebox.showinfo(
-                "Database changed", f"Now using:\n{store.VECTORS_DIR}{hint}")
+            then()
+
+    def _open_db_finder(self, on_close=None):
+        """Window that searches this computer's drives for LegalMind
+        databases, describes each one, and connects the chosen one."""
+        import store
+        if self._db_finder is not None:
+            try:
+                if self._db_finder.winfo_exists():
+                    self._db_finder.lift()
+                    return
+            except tk.TclError:
+                pass
+
+        win = tk.Toplevel(self.root)
+        self._db_finder = win
+        win.title("Find LegalMind databases")
+        win.configure(bg=BG)
+        win.geometry("900x500")
+        win.transient(self.root)
+        stop = threading.Event()
+        state = {"closed": False, "found": 0}
+
+        def close(run_on_close=True):
+            stop.set()
+            if state["closed"]:
+                return
+            state["closed"] = True
+            self._db_finder = None
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+            if run_on_close and on_close:
+                self.root.after(50, on_close)
+
+        win.protocol("WM_DELETE_WINDOW", close)
+
+        def ui(fn, *a, **kw):
+            """Run fn on the UI thread, unless the window has closed."""
+            def run():
+                if state["closed"]:
+                    return
+                try:
+                    fn(*a, **kw)
+                except tk.TclError:
+                    pass
+            try:
+                self.root.after(0, run)
+            except RuntimeError:
+                pass
+
+        tk.Label(win, text="LegalMind databases on this computer",
+                 font=FONT_HEADING, bg=BG, fg=ACCENT_LIGHT).pack(
+            anchor="w", padx=16, pady=(14, 2))
+        tk.Label(win, text="Pick one and click Connect. Nothing is copied or "
+                           "moved -- LegalMind just opens that folder.",
+                 font=FONT_SMALL, bg=BG, fg=FG_MUTED).pack(anchor="w", padx=16)
+        status = tk.Label(win, text="Starting search...", font=FONT_SMALL,
+                          bg=BG, fg=FG_DIM, anchor="w")
+        status.pack(fill="x", padx=16, pady=(8, 4))
+
+        card = tk.Frame(win, bg=BG_CARD, highlightthickness=1,
+                        highlightbackground=BORDER)
+        card.pack(fill="both", expand=True, padx=16, pady=4)
+        cols = ("path", "cases", "chunks", "updated")
+        tree = ttk.Treeview(card, columns=cols, show="headings", height=8,
+                            selectmode="browse")
+        for col, label, width, anchor in (
+                ("path", "Location", 470, "w"), ("cases", "Cases", 70, "center"),
+                ("chunks", "Chunks", 110, "center"),
+                ("updated", "Last updated", 140, "center")):
+            tree.heading(col, text=label)
+            tree.column(col, width=width, anchor=anchor)
+        tree.pack(fill="both", expand=True, padx=4, pady=4)
+
+        detail = tk.Label(win, text="", font=FONT_SMALL, bg=BG, fg=FG_DIM,
+                          anchor="w", justify="left", wraplength=860)
+        detail.pack(fill="x", padx=16, pady=(4, 4))
+
+        btns = tk.Frame(win, bg=BG)
+        btns.pack(fill="x", padx=16, pady=(4, 14))
+        connect_btn = ttk.Button(btns, text="Connect", state="disabled")
+        connect_btn.pack(side="left")
+
+        def browse():
+            if self._change_db_location():
+                close(run_on_close=False)
+                if on_close:
+                    self.root.after(50, on_close)
+        ttk.Button(btns, text="Browse for a folder...", command=browse).pack(
+            side="left", padx=8)
+        stop_btn = ttk.Button(btns, text="Stop search", command=stop.set)
+        stop_btn.pack(side="left")
+        ttk.Button(btns, text="Close", command=close).pack(side="right")
+
+        infos = {}
+        in_use = os.path.normcase(os.path.abspath(store.VECTORS_DIR))
+
+        def usable(info):
+            return info["is_legalmind"] and not info["error"]
+
+        def add_row(info):
+            path = info["path"]
+            current = os.path.normcase(path) == in_use
+            if info["error"]:
+                cases_txt, chunks_txt = "-", "unreadable"
+            elif not info["is_legalmind"]:
+                cases_txt, chunks_txt = "-", "not LegalMind"
+            else:
+                cases_txt = str(len(info["cases"]))
+                chunks_txt = (f"{info['chunks']:,}" if info["chunks"] is not None
+                              else "?")
+            label = path + ("   (in use now)" if current else "")
+            iid = tree.insert("", "end", values=(label, cases_txt, chunks_txt,
+                                                 info["updated"] or "-"))
+            infos[iid] = dict(info, current=current)
+            if not tree.selection() and usable(info) and not current \
+                    and info["chunks"]:
+                tree.selection_set(iid)
+                tree.see(iid)
+
+        def on_select(_e=None):
+            sel = tree.selection()
+            info = infos.get(sel[0]) if sel else None
+            if not info:
+                connect_btn.configure(state="disabled")
+                detail.configure(text="")
+                return
+            if info["error"]:
+                text = f"Could not read this database: {info['error']}"
+            elif not info["is_legalmind"]:
+                text = ("This folder holds LanceDB data from another program, "
+                        "not LegalMind cases.")
+            else:
+                names = info["cases"]
+                shown = ", ".join(names[:12])
+                if len(names) > 12:
+                    shown += f", and {len(names) - 12} more"
+                text = (f"Cases: {shown or '(none recorded)'}    |    "
+                        f"{info['files'] or 0:,} files indexed")
+                if info["current"]:
+                    text += "    |    This is the database LegalMind is using now."
+            detail.configure(text=text)
+            connect_btn.configure(
+                state="normal" if usable(info) and not info["current"]
+                else "disabled")
+
+        def connect():
+            sel = tree.selection()
+            info = infos.get(sel[0]) if sel else None
+            if not info or not usable(info) or info["current"]:
+                return
+            if self._connect_db(info["path"], parent=win, then=on_close):
+                close(run_on_close=False)
+
+        tree.bind("<<TreeviewSelect>>", on_select)
+        tree.bind("<Double-1>", lambda _e: connect())
+        connect_btn.configure(command=connect)
+
+        def worker():
+            roots = store.default_search_roots()
+            drives = [r for r in roots if len(r.rstrip("\\/")) <= 2 or r in ("/Volumes", "/mnt", "/media")]
+            where = "your folders, then " + (" ".join(drives) if drives else "this computer")
+            ui(status.configure, text=f"Searching {where} ...")
+
+            def found(path):
+                info = store.describe_store(path)
+                state["found"] += 1
+                ui(add_row, info)
+
+            def progress(n, path):
+                if path:
+                    ui(status.configure,
+                       text=f"Searching {where} ... {n:,} folders checked, "
+                            f"{state['found']} database(s) found so far")
+
+            try:
+                store.find_stores(roots, on_found=found, on_progress=progress,
+                                  should_stop=stop.is_set)
+            except Exception as e:
+                logger.error("Database search failed: %s", e, exc_info=True)
+
+            def done():
+                n = state["found"]
+                head = "Search stopped. " if stop.is_set() else "Search finished. "
+                if n:
+                    msg = head + f"Found {n} database(s)."
+                else:
+                    msg = head + ("No LegalMind databases found. If yours is on "
+                                  "a drive that is not connected right now, "
+                                  "connect it, or use 'Browse for a folder'.")
+                status.configure(text=msg)
+                stop_btn.configure(state="disabled")
+            ui(done)
+
+        threading.Thread(target=worker, daemon=True, name="db-finder").start()
+
+    # -- Claude (subscription) sign-in -----------------------------------------
+    @staticmethod
+    def _claude_status_text(st: dict):
+        if not st.get("installed"):
+            return "Claude Code is not installed", ROSE
+        if st.get("logged_in") is True:
+            plan = f" -- Claude {st['plan']} plan" if st.get("plan") else ""
+            return f"Signed in{plan}", TEAL
+        if st.get("logged_in") is False:
+            return "Not signed in", AMBER
+        return f"Unknown ({st.get('detail') or 'no answer'})", FG_DIM
+
+    def _show_claude_status(self, st: dict):
+        label = getattr(self, "_claude_status_label", None)
+        if label is not None:
+            text, color = self._claude_status_text(st)
+            label.configure(text=text, fg=color)
+
+    def _refresh_claude_status(self, then=None):
+        """Ask the Claude CLI whether it is signed in (in the background),
+        show the answer in Settings, then call then(status) on the UI thread."""
+        label = getattr(self, "_claude_status_label", None)
+        if label is not None:
+            label.configure(text="Checking...", fg=FG_DIM)
+
+        def run():
+            st = claude_cli_auth_status()
+
+            def apply():
+                self._show_claude_status(st)
+                if then:
+                    then(st)
+            self.root.after(0, apply)
+
+        threading.Thread(target=run, daemon=True, name="claude-auth").start()
+
+    def _maybe_prompt_claude_login(self, user_initiated: bool = False):
+        """Offer to sign in when "Claude (subscription)" is the provider and
+        Claude Code is signed out (or not installed). At most once per run
+        unless the user just picked that provider."""
+        def decide(st):
+            if (self.llm_provider_var.get() != "claude-cli"
+                    or self._claude_login_polling
+                    or (self._claude_prompted and not user_initiated)):
+                return
+            if not st["installed"]:
+                self._claude_prompted = True
+                if messagebox.askyesno(
+                        "Claude Code not installed",
+                        "The \"Claude (subscription)\" provider needs the free "
+                        "Claude Code app, which is not installed on this "
+                        "computer.\n\nOpen the download page?"):
+                    import webbrowser
+                    webbrowser.open(CLAUDE_CODE_INSTALL_URL)
+                return
+            if st["logged_in"] is False:
+                self._claude_prompted = True
+                if messagebox.askyesno(
+                        "Sign in to Claude",
+                        "LegalMind is set to use your Claude subscription, but "
+                        "Claude Code is not signed in on this computer.\n\n"
+                        "Sign in now? A sign-in window will open and take you "
+                        "to your browser."):
+                    self._sign_in_to_claude()
+
+        self._refresh_claude_status(then=decide)
+
+    def _sign_in_to_claude(self):
+        """Open Claude Code's sign-in window and wait for it to finish."""
+        ok, msg = start_claude_login()
+        if not ok:
+            messagebox.showerror("Sign in to Claude", msg)
+            return
+        self._update_status("Waiting for you to finish signing in to Claude...")
+        label = getattr(self, "_claude_status_label", None)
+        if label is not None:
+            label.configure(text="Waiting for you to finish signing in...",
+                            fg=AMBER)
+        if not self._claude_login_polling:
+            self._claude_login_polling = True
+            self._poll_claude_login(deadline=time.time() + 600)
+
+    def _poll_claude_login(self, deadline: float):
+        """Re-check every few seconds until signed in or 10 minutes pass."""
+        def run():
+            st = claude_cli_auth_status()
+
+            def apply():
+                if st["logged_in"] is True:
+                    self._claude_login_polling = False
+                    self._show_claude_status(st)
+                    self._update_status("Signed in to Claude.")
+                    messagebox.showinfo(
+                        "Sign in to Claude",
+                        "You're signed in. LegalMind can now use your Claude "
+                        "subscription.")
+                elif time.time() > deadline:
+                    self._claude_login_polling = False
+                    self._show_claude_status(st)
+                    self._update_status("Claude sign-in was not finished.")
+                else:
+                    self.root.after(3000, lambda: self._poll_claude_login(deadline))
+            self.root.after(0, apply)
+
+        threading.Thread(target=run, daemon=True, name="claude-login-poll").start()
+
+    def _after_claude_reply(self, provider: str, text: str):
+        """A chat reply that says Claude is signed out -> offer to sign in."""
+        if (provider == "claude-cli" and text and CLAUDE_CLI_LOGIN_HELP in text
+                and not self._claude_login_polling):
+            if messagebox.askyesno("Sign in to Claude",
+                                   "Claude is not signed in on this computer. "
+                                   "Sign in now?"):
+                self._sign_in_to_claude()
 
     # =========================================================================
     # CHAT TAB (replaces old Query tab)
@@ -524,6 +910,8 @@ class LegalMindApp:
             if key:
                 self.llm_provider_var.set(key)
                 self._persist_pref("llm_provider", key)
+                if key == "claude-cli":
+                    self._maybe_prompt_claude_login(user_initiated=True)
         provider_combo.bind("<<ComboboxSelected>>", _on_provider_pick)
 
         tk.Label(top_inner, text="Mode:", font=FONT, bg=BG_MID, fg=FG_DIM
@@ -1002,6 +1390,7 @@ class LegalMindApp:
                         self._chat_history.append(
                             {"role": "assistant", "content": response_text})
                         self._autosave_session()
+                        self._after_claude_reply(provider, response_text)
                     self.root.after(0, finalize)
                 except Exception as e:
                     logger.error("Chat error: %s", e, exc_info=True)
@@ -1040,6 +1429,7 @@ class LegalMindApp:
                     self._chat_history.append(
                         {"role": "assistant", "content": response_text})
                     self._autosave_session()
+                    self._after_claude_reply(provider, response_text)
                 self.root.after(0, show)
             except Exception as e:
                 logger.error("Chat error: %s", e, exc_info=True)
@@ -1868,6 +2258,8 @@ class LegalMindApp:
                  bg=BG, fg=ACCENT_LIGHT).pack(side="left")
         ttk.Button(top, text="Refresh", style="Ghost.TButton",
                    command=self._refresh_case_lists).pack(side="right")
+        ttk.Button(top, text="Find Databases...", style="Ghost.TButton",
+                   command=self._open_db_finder).pack(side="right", padx=(0, 8))
 
         # Actions
         actions = tk.Frame(tab, bg=BG)
@@ -1906,13 +2298,19 @@ class LegalMindApp:
     def _refresh_case_lists(self):
         try:
             cases = list_cases()
-            logger.info("Refreshed case list: %d case(s) -- %s",
-                        len(cases),
-                        ", ".join(f"{c['name']}({c['chunks']})" for c in cases) or "(empty)")
+            self._case_list_error = None
         except Exception as e:
             logger.error("Failed to refresh case list: %s", e, exc_info=True)
             cases = []
+            self._case_list_error = e
+        self._apply_case_list(cases)
 
+    def _apply_case_list(self, cases):
+        """Show `cases` (from store.list_cases) in the Cases tab and dropdowns."""
+        self._last_case_count = len(cases)
+        logger.info("Refreshed case list: %d case(s) -- %s",
+                    len(cases),
+                    ", ".join(f"{c['name']}({c['chunks']})" for c in cases) or "(empty)")
         for item in self.cases_tree.get_children():
             self.cases_tree.delete(item)
         for c in cases:
@@ -2048,6 +2446,32 @@ class LegalMindApp:
             save_settings({"llm_provider": self._settings_provider_var.get()})
         self._settings_provider_var.trace_add("write", save_provider)
         row += 1
+
+        # -- Claude (subscription) ---
+        tk.Label(inner, text="", bg=BG).grid(row=row, column=0, pady=4); row += 1
+        tk.Label(inner, text="Claude (subscription)", font=FONT_HEADING,
+                 bg=BG, fg=ACCENT_LIGHT).grid(
+            row=row, column=0, columnspan=3, sticky="w", pady=(0, 6)); row += 1
+
+        tk.Label(inner, text="Status:", font=FONT, bg=BG, fg=FG).grid(
+            row=row, column=0, sticky="w", pady=6)
+        self._claude_status_label = tk.Label(
+            inner, text="Not checked yet", font=FONT_SMALL, bg=BG, fg=FG_DIM,
+            anchor="w")
+        self._claude_status_label.grid(row=row, column=1, sticky="w",
+                                       padx=(10, 0), pady=6)
+        claude_btns = tk.Frame(inner, bg=BG)
+        claude_btns.grid(row=row, column=2, sticky="w", padx=(10, 0), pady=6)
+        ttk.Button(claude_btns, text="Sign in to Claude",
+                   command=self._sign_in_to_claude).pack(side="left")
+        ttk.Button(claude_btns, text="Check",
+                   command=self._refresh_claude_status).pack(side="left",
+                                                            padx=(6, 0))
+        row += 1
+        tk.Label(inner, text=("Uses your Claude Pro/Max plan through Claude "
+                              "Code -- no API key, no per-message cost."),
+                 font=FONT_SMALL, bg=BG, fg=FG_MUTED).grid(
+            row=row, column=0, columnspan=3, sticky="w", pady=(0, 4)); row += 1
 
         # -- Ollama ---
         tk.Label(inner, text="", bg=BG).grid(row=row, column=0, pady=4); row += 1
@@ -2307,9 +2731,13 @@ class LegalMindApp:
                                       font=FONT_SMALL, bg=BG, fg=FG_DIM,
                                       wraplength=420, justify="left", anchor="w")
         self.db_path_label.grid(row=row, column=1, sticky="w", padx=(10, 0), pady=4)
-        ttk.Button(inner, text="Change...",
-                   command=self._change_db_location).grid(
-            row=row, column=2, padx=(10, 0), pady=4); row += 1
+        db_btns = tk.Frame(inner, bg=BG)
+        db_btns.grid(row=row, column=2, sticky="w", padx=(10, 0), pady=4)
+        ttk.Button(db_btns, text="Find...",
+                   command=self._open_db_finder).pack(side="left")
+        ttk.Button(db_btns, text="Change...",
+                   command=self._change_db_location).pack(side="left", padx=(6, 0))
+        row += 1
 
         tk.Label(inner, text="Embeddings:", font=FONT, bg=BG, fg=FG).grid(
             row=row, column=0, sticky="w", pady=4)

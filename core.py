@@ -6,6 +6,7 @@ Used by ingest, query, GUI, and MCP server.
 import io
 import logging
 import os
+import shutil
 import sys
 import warnings
 from typing import Optional
@@ -407,9 +408,10 @@ def _claude_cli_args(exe: str, model: str, lean: bool) -> list:
 # raw text is replaced/followed by where to actually type it.
 CLAUDE_CLI_LOGIN_HELP = (
     "Claude Code is not signed in, so LegalMind cannot use your Claude "
-    "subscription yet. Open a terminal (PowerShell or Command Prompt), run "
-    "`claude`, type /login and finish signing in with your Claude account. "
-    "Then send your message again -- or pick a different Provider above.")
+    "subscription yet. Click \"Sign in to Claude\" in Settings (or open a "
+    "terminal, run `claude` and type /login), finish signing in with your "
+    "Claude account, then send your message again -- or pick a different "
+    "Provider above.")
 
 
 def _is_not_logged_in(text: str) -> bool:
@@ -431,6 +433,108 @@ def _claude_cli_env() -> dict:
                 "ANTHROPIC_BASE_URL", "CLAUDE_API_KEY"):
         env.pop(var, None)
     return env
+
+
+CLAUDE_CODE_INSTALL_URL = "https://claude.com/claude-code"
+
+
+def claude_cli_auth_status(timeout: int = 30) -> dict:
+    """Is the Claude Code CLI signed in? Asks `claude auth status --json`.
+
+    Returns {installed, logged_in, method, plan, detail}. logged_in is
+    True / False, or None when it cannot be told (an old CLI without
+    `auth status`, a timeout, unreadable output) -- callers must treat None
+    as "unknown", never as "signed out", or a signed-in user gets nagged.
+    The account e-mail the CLI also reports is deliberately not passed on.
+    """
+    import json
+    import subprocess
+    st = {"installed": False, "logged_in": False, "method": "", "plan": "",
+          "detail": ""}
+    exe = _claude_cli_path()
+    if not exe:
+        st["detail"] = "Claude Code CLI not found"
+        return st
+    st["installed"] = True
+    try:
+        r = subprocess.run([exe, "auth", "status", "--json"],
+                           capture_output=True, text=True, timeout=timeout,
+                           encoding="utf-8", errors="replace",
+                           env=_claude_cli_env())
+    except subprocess.TimeoutExpired:
+        st.update(logged_in=None, detail="Claude CLI did not answer in time")
+        return st
+    except Exception as e:
+        st.update(logged_in=None, detail=f"could not run Claude CLI: {e}")
+        return st
+    out = (r.stdout or "").strip()
+    data = {}
+    if "{" in out:
+        try:
+            data = json.loads(out[out.index("{"):])
+        except ValueError:
+            data = {}
+    if isinstance(data, dict) and "loggedIn" in data:   # exits 1 when signed out
+        st.update(logged_in=bool(data["loggedIn"]),
+                  method=str(data.get("authMethod") or ""),
+                  plan=str(data.get("subscriptionType") or ""))
+        return st
+    st.update(logged_in=None,
+              detail=((r.stderr or "").strip() or out)[:300]
+              or f"unexpected reply (exit {r.returncode})")
+    return st
+
+
+def start_claude_login() -> tuple:
+    """Open Claude Code's own sign-in flow (`claude auth login --claudeai`)
+    in a visible terminal window. Returns (ok, message).
+
+    The CLI opens the browser and finishes there; the window closes by itself
+    afterwards. Callers find out it worked by polling claude_cli_auth_status().
+    --claudeai picks the subscription login (not API/Console billing), and the
+    API-key variables are stripped for the same reason as _claude_cli_env().
+    """
+    import subprocess
+    exe = _claude_cli_path()
+    if not exe:
+        return False, ("Claude Code is not installed. Install it from "
+                       f"{CLAUDE_CODE_INSTALL_URL}, then sign in.")
+    cmd = [exe, "auth", "login", "--claudeai"]
+    manual = ("Open a terminal and run:  claude auth login  "
+              "(then finish in the browser).")
+    env = _claude_cli_env()
+    try:
+        if sys.platform == "win32":
+            # The app hides every child window by default (see
+            # _silence_subprocess_windows); this one must be seen.
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 1                      # SW_SHOWNORMAL
+            subprocess.Popen(cmd, env=env, startupinfo=si,
+                             creationflags=subprocess.CREATE_NEW_CONSOLE)
+        elif sys.platform == "darwin":
+            import shlex
+            line = ("env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN "
+                    + shlex.join(cmd))
+            script = 'tell application "Terminal" to do script "%s"' % (
+                line.replace("\\", "\\\\").replace('"', '\\"'))
+            subprocess.Popen(["osascript", "-e", script, "-e",
+                              'tell application "Terminal" to activate'])
+        else:
+            for term in (["x-terminal-emulator", "-e"], ["gnome-terminal", "--"],
+                         ["konsole", "-e"], ["xfce4-terminal", "-x"],
+                         ["xterm", "-e"]):
+                if shutil.which(term[0]):
+                    subprocess.Popen(term + cmd, env=env)
+                    break
+            else:
+                return False, f"No terminal program found. {manual}"
+    except Exception as e:
+        logger.warning("could not open the Claude sign-in window: %s", e)
+        return False, f"Could not open a sign-in window ({e}). {manual}"
+    return True, ("A Claude sign-in window has opened. Finish signing in with "
+                  "your Claude account in the browser; LegalMind will notice "
+                  "when you are done.")
 
 
 def query_claude_cli(prompt: str, model: str = DEFAULT_CLAUDE_CLI_MODEL,

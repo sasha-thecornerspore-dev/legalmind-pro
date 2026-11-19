@@ -196,3 +196,111 @@ def test_stream_not_logged_in_explains_how_to_sign_in(monkeypatch):
     assert "not signed in" in out.lower() and "terminal" in out.lower()
     assert "".join(got).strip() == out          # the user saw the same thing
     assert "[Claude CLI error: 1]" not in out   # no bare exit code
+
+
+# ── Sign-in status and the in-app "Sign in to Claude" action ─────────────────
+
+_LOGGED_IN_JSON = ('{"loggedIn": true, "authMethod": "claude.ai", '
+                   '"subscriptionType": "max", "email": "someone@example.com"}')
+_LOGGED_OUT_JSON = '{"loggedIn": false, "authMethod": "none"}'
+
+
+def _fake_status(monkeypatch, stdout, rc=0, stderr=""):
+    seen = {}
+
+    def fake_run(args, **kw):
+        seen["args"], seen["env"] = args, kw.get("env")
+        return types.SimpleNamespace(returncode=rc, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(core, "_claude_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return seen
+
+
+def test_auth_status_signed_in(monkeypatch):
+    seen = _fake_status(monkeypatch, _LOGGED_IN_JSON)
+    st = core.claude_cli_auth_status()
+    assert st["installed"] is True and st["logged_in"] is True
+    assert st["method"] == "claude.ai" and st["plan"] == "max"
+    assert seen["args"][1:3] == ["auth", "status"]
+    assert "email" not in st                      # never surfaced or logged
+
+
+def test_auth_status_signed_out_exit_code_1(monkeypatch):
+    _fake_status(monkeypatch, _LOGGED_OUT_JSON, rc=1)
+    st = core.claude_cli_auth_status()
+    assert st["installed"] is True and st["logged_in"] is False
+
+
+def test_auth_status_uses_subscription_env(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    seen = _fake_status(monkeypatch, _LOGGED_IN_JSON)
+    core.claude_cli_auth_status()
+    assert "ANTHROPIC_API_KEY" not in seen["env"]
+
+
+def test_auth_status_cli_missing(monkeypatch):
+    monkeypatch.setattr(core, "_claude_cli_path", lambda: "")
+    st = core.claude_cli_auth_status()
+    assert st["installed"] is False and st["logged_in"] is False
+
+
+def test_auth_status_unknown_when_unparseable(monkeypatch):
+    """An old CLI without `auth status` must read as 'unknown', never as
+    'signed out' -- or the app would nag a user who is signed in."""
+    _fake_status(monkeypatch, "", rc=1, stderr="error: unknown command 'auth'")
+    st = core.claude_cli_auth_status()
+    assert st["installed"] is True and st["logged_in"] is None
+    assert "unknown command" in st["detail"]
+
+
+def test_auth_status_timeout(monkeypatch):
+    def fake_run(args, **kw):
+        raise subprocess.TimeoutExpired(args, 1)
+    monkeypatch.setattr(core, "_claude_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert core.claude_cli_auth_status()["logged_in"] is None
+
+
+def test_start_login_opens_a_visible_login_window(monkeypatch):
+    calls = []
+
+    class FakePopen:
+        def __init__(self, args, **kw):
+            calls.append((args, kw))
+
+    monkeypatch.setattr(core, "_claude_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    ok, msg = core.start_claude_login()
+    assert ok, msg
+    args, kw = calls[0]
+    flat = " ".join(args)
+    assert "auth login" in flat and "--claudeai" in flat
+    if core.sys.platform == "win32":
+        # Must override the app-wide hidden-window default, or the sign-in
+        # prompt would open invisibly.
+        assert kw["creationflags"] & subprocess.CREATE_NEW_CONSOLE
+        assert kw["startupinfo"].wShowWindow != 0
+        assert "ANTHROPIC_API_KEY" not in kw["env"]
+
+
+def test_start_login_without_cli(monkeypatch):
+    monkeypatch.setattr(core, "_claude_cli_path", lambda: "")
+    ok, msg = core.start_claude_login()
+    assert not ok and "claude.com/claude-code" in msg
+
+
+def test_start_login_failure_is_reported(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("no terminal")
+    monkeypatch.setattr(core, "_claude_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
+    ok, msg = core.start_claude_login()
+    assert not ok and "claude auth login" in msg
+
+
+def test_login_help_points_at_the_in_app_button():
+    assert "Sign in to Claude" in core.CLAUDE_CLI_LOGIN_HELP
