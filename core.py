@@ -54,7 +54,7 @@ logger = logging.getLogger("legalmind.core")
 # ── Version ──────────────────────────────────────────────────────────────────
 # Single source of truth. The in-app updater compares this against the latest
 # GitHub Release tag (see updater.py). Bump on every tagged release.
-VERSION = "11.4.3"
+VERSION = "11.5.0"
 
 # Repo the in-app updater checks for new releases. Forks can repoint it with
 # the LEGALMIND_REPO environment variable without editing source.
